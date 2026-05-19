@@ -74,6 +74,29 @@ const (
 	AccessNone        AccessLevel = "none"
 )
 
+// AccessLevelFromString converts a string to an AccessLevel constant.
+// Returns AccessNone for unknown strings.
+func AccessLevelFromString(s string) AccessLevel {
+	switch s {
+	case "full":
+		return AccessFull
+	case "read":
+		return AccessRead
+	case "anonymized":
+		return AccessAnonymized
+	case "k_anonymized":
+		return AccessKAnonymized
+	case "slice":
+		return AccessSlice
+	case "aggregated":
+		return AccessAggregated
+	case "audit_log":
+		return AccessAuditLog
+	default:
+		return AccessNone
+	}
+}
+
 // AccessLevelRank returns a numeric rank; higher = more privileged
 func AccessLevelRank(l AccessLevel) int {
 	ranks := map[AccessLevel]int{

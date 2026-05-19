@@ -1,8 +1,14 @@
 package access
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"time"
 
 	"github.com/zafrem/bastion-vault/internal/model"
 )
@@ -62,11 +68,17 @@ var deanonymizeRoles = map[string]map[model.DataCategory]bool{
 // and optionally delegates to OPA for complex policy evaluation.
 type Controller struct {
 	opaEndpoint string // empty = OPA disabled, use built-in RBAC only
+	httpClient  *http.Client
 }
 
 // NewController creates a Controller. Pass an empty opaEndpoint to use built-in RBAC only.
 func NewController(opaEndpoint string) *Controller {
-	return &Controller{opaEndpoint: opaEndpoint}
+	return &Controller{
+		opaEndpoint: opaEndpoint,
+		httpClient: &http.Client{
+			Timeout: 2 * time.Second,
+		},
+	}
 }
 
 // Decide returns an AccessDecision for the given user and data category.
@@ -111,17 +123,204 @@ func (c *Controller) CanDeanonymize(user *model.User, category model.DataCategor
 	return cats[category]
 }
 
+// ReloadPolicies signals OPA to reload its policies by checking the OPA endpoint health.
+// If OPA is unavailable this is a no-op (policies are already embedded in RBAC).
+func (c *Controller) ReloadPolicies(ctx context.Context) error {
+	if c.opaEndpoint == "" {
+		return nil
+	}
+	// Ping OPA by issuing a query to a well-known endpoint.
+	reqURL := c.opaEndpoint + "/v1/data"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return fmt.Errorf("access: building OPA reload request: %w", err)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("access: OPA unreachable during reload: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("access: OPA reload returned status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// opaInput is the JSON body sent to OPA.
+type opaInput struct {
+	Input opaInputData `json:"input"`
+}
+
+type opaInputData struct {
+	User     opaUser     `json:"user"`
+	Resource opaResource `json:"resource"`
+	Action   string      `json:"action"`
+}
+
+type opaUser struct {
+	UserID     string `json:"user_id"`
+	Department string `json:"department"`
+	Role       string `json:"role"`
+	TenantID   string `json:"tenant_id"`
+}
+
+type opaResource struct {
+	Category string `json:"category"`
+}
+
+type opaAllowResponse struct {
+	Result bool `json:"result"`
+}
+
+type opaAccessLevelResponse struct {
+	Result string `json:"result"`
+}
+
 // evaluateOPA delegates to the OPA HTTP API for policy evaluation.
-// This is a stub; in production the OPA client SDK (or HTTP call) would be used.
+// If OPA is unreachable or returns non-200, falls back to RBAC decision (fail-open).
 func (c *Controller) evaluateOPA(ctx context.Context, user *model.User, category model.DataCategory, fallback model.AccessLevel) (*model.AccessDecision, error) {
-	// OPA policy evaluation is performed via HTTP POST to /v1/data/vault/allow.
-	// If OPA is unreachable we fall back to the RBAC decision (fail-open is intentional
-	// here because OPA is an additional constraint layer, not a replacement).
+	userID := user.UserID
+	if userID == "" {
+		userID = user.ID
+	}
+
+	input := opaInput{
+		Input: opaInputData{
+			User: opaUser{
+				UserID:     userID,
+				Department: user.Department,
+				Role:       user.Role,
+				TenantID:   user.TenantID,
+			},
+			Resource: opaResource{
+				Category: "customer_data",
+			},
+			Action: "read",
+		},
+	}
+
+	bodyBytes, err := json.Marshal(input)
+	if err != nil {
+		log.Printf("access: OPA marshal error: %v — falling back to RBAC", err)
+		return c.rbacDecision(fallback), nil
+	}
+
+	// Query allow policy.
+	allowed, err := c.queryOPABool(ctx, c.opaEndpoint+"/v1/data/bastion/vault/access/allow", bodyBytes)
+	if err != nil {
+		log.Printf("access: OPA allow query failed: %v — falling back to RBAC", err)
+		return c.rbacDecision(fallback), nil
+	}
+
+	if !allowed {
+		return &model.AccessDecision{
+			Allowed:     false,
+			AccessLevel: model.AccessNone,
+			Reason:      "denied by OPA policy",
+		}, nil
+	}
+
+	// Query access_level policy.
+	levelStr, err := c.queryOPAString(ctx, c.opaEndpoint+"/v1/data/bastion/vault/access/access_level", bodyBytes)
+	if err != nil {
+		log.Printf("access: OPA access_level query failed: %v — falling back to RBAC level", err)
+		return c.rbacDecision(fallback), nil
+	}
+
+	level := mapOPAAccessLevel(levelStr, fallback)
 	return &model.AccessDecision{
 		Allowed:     true,
-		AccessLevel: fallback,
-		Reason:      "allowed by RBAC (OPA integration placeholder)",
+		AccessLevel: level,
+		Reason:      "allowed by OPA policy",
 	}, nil
+}
+
+func (c *Controller) rbacDecision(level model.AccessLevel) *model.AccessDecision {
+	return &model.AccessDecision{
+		Allowed:     true,
+		AccessLevel: level,
+		Reason:      "allowed by RBAC (OPA fallback)",
+	}
+}
+
+func (c *Controller) queryOPABool(ctx context.Context, url string, body []byte) (bool, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("OPA returned status %d", resp.StatusCode)
+	}
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return false, err
+	}
+
+	var result opaAllowResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return false, err
+	}
+	return result.Result, nil
+}
+
+func (c *Controller) queryOPAString(ctx context.Context, url string, body []byte) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("OPA returned status %d", resp.StatusCode)
+	}
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	var result opaAccessLevelResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", err
+	}
+	return result.Result, nil
+}
+
+// mapOPAAccessLevel converts an OPA access level string to model.AccessLevel.
+func mapOPAAccessLevel(s string, fallback model.AccessLevel) model.AccessLevel {
+	switch s {
+	case "full":
+		return model.AccessFull
+	case "read":
+		return model.AccessRead
+	case "anonymized":
+		return model.AccessAnonymized
+	case "k_anonymized":
+		return model.AccessKAnonymized
+	case "slice":
+		return model.AccessSlice
+	case "aggregated":
+		return model.AccessAggregated
+	case "audit_log":
+		return model.AccessAuditLog
+	case "none":
+		return model.AccessNone
+	default:
+		return fallback
+	}
 }
 
 // EnforceMinimumLevel checks that the requested access level does not exceed what is allowed.

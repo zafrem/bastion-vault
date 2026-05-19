@@ -5,12 +5,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
+	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
+	"google.golang.org/grpc"
+
 	"github.com/zafrem/bastion-vault/internal/access"
 	"github.com/zafrem/bastion-vault/internal/anonymizer"
 	"github.com/zafrem/bastion-vault/internal/audit"
@@ -58,7 +64,18 @@ func loadDeps(cfg *config.Config) (*kms.Manager, *audit.Logger, error) {
 	}
 	mgr := kms.NewManager(local, cfg.KMS.DEKCacheTTL)
 
-	aud, err := audit.NewLogger(cfg.Audit.OutputDir, cfg.Audit.SigningEnabled)
+	// Derive a 32-byte signing key from the KMS master key for audit HMAC.
+	// In production this would be a dedicated KMS-managed key.
+	var signingKey []byte
+	if cfg.Audit.SigningEnabled {
+		sk, kerr := local.GenerateHMACKey(context.Background(), "audit-signing-key")
+		if kerr != nil {
+			return nil, nil, fmt.Errorf("audit signing key: %w", kerr)
+		}
+		signingKey = sk
+	}
+
+	aud, err := audit.NewLogger(cfg.Audit.OutputDir, cfg.Audit.SigningEnabled, signingKey)
 	if err != nil {
 		return nil, nil, fmt.Errorf("audit logger init: %w", err)
 	}
@@ -88,16 +105,60 @@ func newServerCmd() *cobra.Command {
 			kv := kanon.New()
 			bg := breakglass.NewManager(aud)
 
-			srv := server.New(eng, cls, ctrl, kv, bg, aud, cfg)
+			httpSrv := server.New(eng, cls, ctrl, kv, bg, aud, cfg)
 
-			addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.HTTPPort)
+			httpAddr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.HTTPPort)
+			grpcAddr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.GRPCPort)
 			printBox("Bastion Vault Server", []string{
-				"Address : " + addr,
+				"HTTP    : " + httpAddr,
+				"gRPC    : " + grpcAddr,
 				"KMS     : " + cfg.KMS.Provider,
 				"OPA     : " + cfg.OPA.PolicyDir,
 			})
 
-			return http.ListenAndServe(addr, srv.Router())
+			// Start HTTP server in background goroutine.
+			netSrv := &http.Server{
+				Addr:    httpAddr,
+				Handler: httpSrv.Router(),
+			}
+			go func() {
+				if err := netSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+					log.Printf("HTTP server error: %v", err)
+				}
+			}()
+
+			// Start gRPC server in background goroutine.
+			grpcSrv := grpc.NewServer()
+			grpcImpl := server.NewGRPCServer(eng, cls, kv, aud)
+			grpcImpl.Register(grpcSrv)
+
+			grpcLis, err := net.Listen("tcp", grpcAddr)
+			if err != nil {
+				return fmt.Errorf("gRPC listen: %w", err)
+			}
+			go func() {
+				if err := grpcSrv.Serve(grpcLis); err != nil {
+					log.Printf("gRPC server error: %v", err)
+				}
+			}()
+
+			// Wait for termination signal.
+			quit := make(chan os.Signal, 1)
+			signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
+			<-quit
+
+			// Graceful shutdown with 60-second timeout.
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+
+			grpcSrv.GracefulStop()
+
+			if err := netSrv.Shutdown(ctx); err != nil {
+				log.Printf("HTTP shutdown error: %v", err)
+			}
+
+			log.Println("graceful shutdown complete")
+			return nil
 		},
 	}
 }

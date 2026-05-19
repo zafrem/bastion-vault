@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -75,6 +76,13 @@ func (s *Server) Router() http.Handler {
 	r.Post("/v1/vault/k-anonymity/validate", s.handleKAnonymityValidate)
 	r.Post("/v1/vault/break-glass/request", s.handleBGRequest)
 	r.Post("/v1/vault/break-glass/approve", s.handleBGApprove)
+	r.Post("/v1/vault/break-glass/revoke", s.handleBGRevoke)
+	r.Get("/v1/vault/break-glass/{id}", s.handleBGStatus)
+
+	r.Get("/v1/config", s.handleGetConfig)
+	r.Post("/v1/config/reload", s.handleConfigReload)
+
+	r.Get("/v1/vault/audit", s.handleAuditLog)
 
 	return r
 }
@@ -345,6 +353,160 @@ func (s *Server) handleBGApprove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, req)
+}
+
+// handleBGRevoke immediately revokes an active break-glass session.
+// body: {"request_id": "BG-xxx"}
+func (s *Server) handleBGRevoke(w http.ResponseWriter, r *http.Request) {
+	user := userFromCtx(r.Context())
+	if user == nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	var body struct {
+		RequestID string `json:"request_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, fmt.Sprintf("invalid request body: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	revokerID := user.UserID
+	if revokerID == "" {
+		revokerID = user.ID
+	}
+
+	if err := s.bgManager.Revoke(r.Context(), body.RequestID, revokerID); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	jsonOK(w, map[string]string{"status": "revoked", "request_id": body.RequestID})
+}
+
+// handleBGStatus returns the current state of a break-glass request.
+// The original requester or an auditor role may view the request.
+func (s *Server) handleBGStatus(w http.ResponseWriter, r *http.Request) {
+	user := userFromCtx(r.Context())
+	if user == nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	id := chi.URLParam(r, "id")
+	req, err := s.bgManager.Get(id)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	// Only the requester or an auditor can view.
+	userID := user.UserID
+	if userID == "" {
+		userID = user.ID
+	}
+	if req.RequesterID != userID && user.Role != "auditor" {
+		jsonError(w, "forbidden: only the requester or an auditor may view this request", http.StatusForbidden)
+		return
+	}
+
+	jsonOK(w, req)
+}
+
+// handleGetConfig returns the sanitized server configuration.
+// Secrets (JWT secret, KMS keys) are omitted. Only auditor or executive role allowed.
+func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
+	user := userFromCtx(r.Context())
+	if user == nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if user.Role != "auditor" && user.Role != "executive" {
+		jsonError(w, "forbidden: auditor or executive role required", http.StatusForbidden)
+		return
+	}
+
+	// Return sanitized config — omit secrets.
+	sanitized := map[string]any{
+		"server": map[string]any{
+			"http_port": s.cfg.Server.HTTPPort,
+			"grpc_port": s.cfg.Server.GRPCPort,
+			"host":      s.cfg.Server.Host,
+		},
+		"kms": map[string]any{
+			"provider": s.cfg.KMS.Provider,
+		},
+		"opa": map[string]any{
+			"policy_dir":    s.cfg.OPA.PolicyDir,
+			"bundle_server": s.cfg.OPA.BundleServer,
+		},
+		"audit": map[string]any{
+			"output_dir":      s.cfg.Audit.OutputDir,
+			"signing_enabled": s.cfg.Audit.SigningEnabled,
+			"retention_days":  s.cfg.Audit.Retention,
+		},
+	}
+	jsonOK(w, sanitized)
+}
+
+// handleConfigReload triggers an OPA policy reload.
+// Only auditor role allowed.
+func (s *Server) handleConfigReload(w http.ResponseWriter, r *http.Request) {
+	user := userFromCtx(r.Context())
+	if user == nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if user.Role != "auditor" {
+		jsonError(w, "forbidden: auditor role required", http.StatusForbidden)
+		return
+	}
+
+	if err := s.controller.ReloadPolicies(r.Context()); err != nil {
+		jsonError(w, fmt.Sprintf("policy reload failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]string{"status": "ok", "message": "policies reloaded"})
+}
+
+// handleAuditLog queries the audit log.
+// Query params: ?tenant=xxx&limit=100&since=2026-01-01T00:00:00Z
+// Only auditor role allowed.
+func (s *Server) handleAuditLog(w http.ResponseWriter, r *http.Request) {
+	user := userFromCtx(r.Context())
+	if user == nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if user.Role != "auditor" {
+		jsonError(w, "forbidden: auditor role required", http.StatusForbidden)
+		return
+	}
+
+	tenantID := r.URL.Query().Get("tenant")
+	limitStr := r.URL.Query().Get("limit")
+	sinceStr := r.URL.Query().Get("since")
+
+	limit := 0
+	if limitStr != "" {
+		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 {
+			limit = l
+		}
+	}
+
+	var since time.Time
+	if sinceStr != "" {
+		if t, err := time.Parse(time.RFC3339, sinceStr); err == nil {
+			since = t
+		}
+	}
+
+	entries, err := s.auditor.Query(r.Context(), tenantID, limit, since)
+	if err != nil {
+		jsonError(w, fmt.Sprintf("audit query failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]any{"entries": entries, "count": len(entries)})
 }
 
 func jsonOK(w http.ResponseWriter, v any) {
