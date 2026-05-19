@@ -19,6 +19,13 @@ type Config struct {
 	Tenant   TenantSettings `mapstructure:"tenant"`
 	Log      LogConfig      `mapstructure:"log"`
 	Auth     AuthConfig     `mapstructure:"auth"`
+	TokenStore TokenStoreConfig `mapstructure:"token_store"`
+}
+
+// TokenStoreConfig selects the persistence backend for token mappings.
+type TokenStoreConfig struct {
+	Driver string `mapstructure:"driver"` // "memory" or "postgres"
+	DSN    string `mapstructure:"dsn"`    // postgres DSN when driver=postgres
 }
 
 // AuthConfig holds JWT validation settings.
@@ -38,11 +45,11 @@ type ServerConfig struct {
 }
 
 type KMSConfig struct {
-	Provider   string          `mapstructure:"provider"` // local | aws | vault
-	Local      LocalKMSConfig  `mapstructure:"local"`
-	AWS        AWSKMSConfig    `mapstructure:"aws"`
-	Vault      VaultKMSConfig  `mapstructure:"vault"`
-	DEKCacheTTL time.Duration  `mapstructure:"dek_cache_ttl"`
+	Provider    string             `mapstructure:"provider"` // local | aws | vault
+	Local       LocalKMSConfig     `mapstructure:"local"`
+	AWS         AWSKMSConfig       `mapstructure:"aws"`
+	HashiCorp   HashiCorpKMSConfig `mapstructure:"vault"`
+	DEKCacheTTL time.Duration      `mapstructure:"dek_cache_ttl"`
 }
 
 type LocalKMSConfig struct {
@@ -51,12 +58,12 @@ type LocalKMSConfig struct {
 }
 
 type AWSKMSConfig struct {
-	Region  string `mapstructure:"region"`
-	KeyARN  string `mapstructure:"key_arn"`
-	Profile string `mapstructure:"profile"`
+	Region      string `mapstructure:"region"`
+	MasterKeyID string `mapstructure:"master_key_id"` // KMS key ID or ARN
+	Profile     string `mapstructure:"profile"`
 }
 
-type VaultKMSConfig struct {
+type HashiCorpKMSConfig struct {
 	Address   string `mapstructure:"address"`
 	Token     string `mapstructure:"token"`
 	MountPath string `mapstructure:"mount_path"`
@@ -113,6 +120,8 @@ func Load(cfgFile string) (*Config, error) {
 	v.SetDefault("kms.provider", "local")
 	v.SetDefault("kms.dek_cache_ttl", 5*time.Minute)
 	v.SetDefault("kms.local.key_dir", "./keys")
+	v.SetDefault("kms.vault.mount_path", "transit")
+	v.SetDefault("token_store.driver", "memory")
 	v.SetDefault("opa.policy_dir", "./policies")
 	v.SetDefault("audit.output_dir", "./audit-logs")
 	v.SetDefault("audit.signing_enabled", true)

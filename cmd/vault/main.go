@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -14,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	_ "github.com/lib/pq"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
 
@@ -58,17 +60,32 @@ func main() {
 }
 
 func loadDeps(cfg *config.Config) (*kms.Manager, *audit.Logger, error) {
-	local, err := kms.NewLocalProvider(cfg.KMS.Local.KeyDir, cfg.KMS.Local.MasterKey)
-	if err != nil {
-		return nil, nil, fmt.Errorf("KMS init: %w", err)
+	ctx := context.Background()
+
+	var provider kms.Provider
+	switch cfg.KMS.Provider {
+	case "aws":
+		p, err := kms.NewAWSProvider(ctx, cfg.KMS.AWS.Region, cfg.KMS.AWS.MasterKeyID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("KMS init (aws): %w", err)
+		}
+		provider = p
+	case "vault":
+		provider = kms.NewHashiCorpProvider(cfg.KMS.HashiCorp.Address, cfg.KMS.HashiCorp.Token, cfg.KMS.HashiCorp.MountPath)
+	default: // "local"
+		p, err := kms.NewLocalProvider(cfg.KMS.Local.KeyDir, cfg.KMS.Local.MasterKey)
+		if err != nil {
+			return nil, nil, fmt.Errorf("KMS init (local): %w", err)
+		}
+		provider = p
 	}
-	mgr := kms.NewManager(local, cfg.KMS.DEKCacheTTL)
+	mgr := kms.NewManager(provider, cfg.KMS.DEKCacheTTL)
 
 	// Derive a 32-byte signing key from the KMS master key for audit HMAC.
 	// In production this would be a dedicated KMS-managed key.
 	var signingKey []byte
 	if cfg.Audit.SigningEnabled {
-		sk, kerr := local.GenerateHMACKey(context.Background(), "audit-signing-key")
+		sk, kerr := provider.GenerateHMACKey(ctx, "audit-signing-key")
 		if kerr != nil {
 			return nil, nil, fmt.Errorf("audit signing key: %w", kerr)
 		}
@@ -80,6 +97,18 @@ func loadDeps(cfg *config.Config) (*kms.Manager, *audit.Logger, error) {
 		return nil, nil, fmt.Errorf("audit logger init: %w", err)
 	}
 	return mgr, aud, nil
+}
+
+// newTokenStore builds the token persistence backend from configuration.
+func newTokenStore(cfg *config.Config) (tokendb.Store, error) {
+	if cfg.TokenStore.Driver == "postgres" {
+		db, err := sql.Open("postgres", cfg.TokenStore.DSN)
+		if err != nil {
+			return nil, fmt.Errorf("token store: %w", err)
+		}
+		return tokendb.NewPostgresStore(db), nil
+	}
+	return tokendb.NewMemoryStore(), nil
 }
 
 func newServerCmd() *cobra.Command {
@@ -99,13 +128,16 @@ func newServerCmd() *cobra.Command {
 			defer aud.Close()
 
 			cls := classification.New()
-			store := tokendb.NewMemoryStore()
+			store, err := newTokenStore(cfg)
+			if err != nil {
+				return err
+			}
 			eng := anonymizer.NewEngine(mgr, cls, aud, store)
 			ctrl := access.NewController(cfg.OPA.BundleServer)
 			kv := kanon.New()
 			bg := breakglass.NewManager(aud)
 
-			httpSrv := server.New(eng, cls, ctrl, kv, bg, aud, cfg)
+			httpSrv := server.New(eng, cls, ctrl, kv, bg, aud, store, cfg)
 
 			httpAddr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.HTTPPort)
 			grpcAddr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.GRPCPort)

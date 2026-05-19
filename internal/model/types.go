@@ -241,6 +241,7 @@ const (
 	AuditEventBreakGlass   AuditEventType = "break_glass"
 	AuditEventKMSOperation AuditEventType = "kms_operation"
 	AuditEventPolicyCheck  AuditEventType = "policy_check"
+	AuditEventErasure      AuditEventType = "erasure"
 )
 
 // User carries identity and role information for access control decisions

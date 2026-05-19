@@ -18,6 +18,7 @@ import (
 	"github.com/zafrem/bastion-vault/internal/config"
 	"github.com/zafrem/bastion-vault/internal/kanon"
 	"github.com/zafrem/bastion-vault/internal/model"
+	"github.com/zafrem/bastion-vault/internal/tokendb"
 )
 
 // Server wraps all service dependencies and exposes the HTTP router.
@@ -28,6 +29,7 @@ type Server struct {
 	kanon      *kanon.Validator
 	bgManager  *breakglass.Manager
 	auditor    *audit.Logger
+	tokenStore tokendb.Store
 	cfg        *config.Config
 	startTime  time.Time
 }
@@ -40,6 +42,7 @@ func New(
 	kv *kanon.Validator,
 	bg *breakglass.Manager,
 	aud *audit.Logger,
+	store tokendb.Store,
 	cfg *config.Config,
 ) *Server {
 	return &Server{
@@ -49,6 +52,7 @@ func New(
 		kanon:      kv,
 		bgManager:  bg,
 		auditor:    aud,
+		tokenStore: store,
 		cfg:        cfg,
 		startTime:  time.Now(),
 	}
@@ -78,6 +82,8 @@ func (s *Server) Router() http.Handler {
 	r.Post("/v1/vault/break-glass/approve", s.handleBGApprove)
 	r.Post("/v1/vault/break-glass/revoke", s.handleBGRevoke)
 	r.Get("/v1/vault/break-glass/{id}", s.handleBGStatus)
+
+	r.Delete("/v1/vault/tokens", s.handleErasure)
 
 	r.Get("/v1/config", s.handleGetConfig)
 	r.Post("/v1/config/reload", s.handleConfigReload)
@@ -411,6 +417,58 @@ func (s *Server) handleBGStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonOK(w, req)
+}
+
+// handleErasure implements the GDPR right-to-erasure: it deletes every token
+// mapping for a tenant. Only a member of that tenant or an auditor may invoke it.
+// Query param: tenant_id (required). Returns 204 No Content on success.
+func (s *Server) handleErasure(w http.ResponseWriter, r *http.Request) {
+	user := userFromCtx(r.Context())
+	if user == nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	tenantID := r.URL.Query().Get("tenant_id")
+	if tenantID == "" {
+		jsonError(w, "tenant_id query parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	if user.TenantID != tenantID && user.Role != "auditor" {
+		jsonError(w, "forbidden: only a tenant member or an auditor may erase tenant data", http.StatusForbidden)
+		return
+	}
+
+	if s.tokenStore == nil {
+		jsonError(w, "token store not configured", http.StatusInternalServerError)
+		return
+	}
+
+	deleted, err := s.tokenStore.DeleteByTenant(r.Context(), tenantID)
+	if err != nil {
+		jsonError(w, fmt.Sprintf("erasure failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	actorID := user.UserID
+	if actorID == "" {
+		actorID = user.ID
+	}
+	s.auditor.Log(r.Context(), model.AuditEvent{ //nolint:errcheck
+		TenantID:     tenantID,
+		EventType:    model.AuditEventErasure,
+		ActorID:      actorID,
+		ResourceType: "token_store",
+		ResourceID:   tenantID,
+		Action:       "erasure",
+		Outcome:      "deleted",
+		Metadata: map[string]any{
+			"entries_deleted": deleted,
+		},
+	})
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleGetConfig returns the sanitized server configuration.

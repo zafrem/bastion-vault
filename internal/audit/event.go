@@ -62,14 +62,20 @@ func (l *Logger) Log(_ context.Context, ev model.AuditEvent) (string, error) {
 
 	var line string
 	if l.sign && len(l.signingKey) > 0 {
-		// Compute HMAC over canonical JSON (the entry without the hmac field)
-		mac := computeHMAC(l.signingKey, data)
-
-		// Inject hmac field into the JSON
+		// Compute HMAC over canonical JSON (the entry without the hmac field).
+		// The canonical form must match what VerifyEntry recomputes: a map
+		// re-marshalled with sorted keys after stripping the hmac field.
 		var m map[string]any
 		if err := json.Unmarshal(data, &m); err != nil {
 			return "", fmt.Errorf("audit: unmarshalling for signing: %w", err)
 		}
+		canonical, err := json.Marshal(m)
+		if err != nil {
+			return "", fmt.Errorf("audit: marshalling canonical event: %w", err)
+		}
+		mac := computeHMAC(l.signingKey, canonical)
+
+		// Inject hmac field into the JSON.
 		m["hmac"] = mac
 		signed, err := json.Marshal(m)
 		if err != nil {
