@@ -1,0 +1,192 @@
+syntax = "proto3";
+
+package vault.v1;
+
+option go_package = "github.com/zafrem/bastion-vault/api/proto;vaultpb";
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+// VaultService exposes anonymization, classification, and access control
+// over gRPC on port 9090.
+service VaultService {
+  // Anonymize applies PII anonymization strategies to a batch of records.
+  rpc Anonymize(AnonymizeRequest) returns (AnonymizeResponse);
+
+  // Deanonymize reverses reversible anonymization for authorised callers.
+  rpc Deanonymize(DeanonymizeRequest) returns (AnonymizeResponse);
+
+  // DetectPII scans a single record and returns all PII field detections.
+  rpc DetectPII(DetectPIIRequest) returns (DetectPIIResponse);
+
+  // Classify infers the data category and k-anonymity threshold.
+  rpc Classify(ClassifyRequest) returns (ClassifyResponse);
+
+  // ValidateKAnonymity checks whether a dataset satisfies the required K.
+  rpc ValidateKAnonymity(KAnonymityRequest) returns (KAnonymityReport);
+
+  // RequestBreakGlass initiates an emergency elevated-access request.
+  rpc RequestBreakGlass(BreakGlassRequest) returns (BreakGlassResponse);
+
+  // ApproveBreakGlass records an approver's consent.
+  rpc ApproveBreakGlass(ApproveBreakGlassRequest) returns (BreakGlassResponse);
+
+  // CheckAccess evaluates whether a user may access a data category.
+  rpc CheckAccess(CheckAccessRequest) returns (AccessDecision);
+}
+
+// ---------------------------------------------------------------------------
+// Anonymize
+// ---------------------------------------------------------------------------
+
+message AnonymizeRequest {
+  string tenant_id        = 1;
+  string category         = 2; // DC-01 | DC-02 | DC-03
+  repeated google.protobuf.Struct records = 3;
+  string purpose          = 4;
+  string requester_id     = 5;
+  string access_level     = 6;
+  string break_glass_token = 7;
+}
+
+message AnonymizeResponse {
+  string tenant_id        = 1;
+  string category         = 2;
+  repeated google.protobuf.Struct records = 3;
+  string audit_id         = 4;
+  AnonymizeMetadata metadata = 5;
+}
+
+message AnonymizeMetadata {
+  int32 record_count      = 1;
+  int32 fields_anonymized = 2;
+  map<string, int32> strategies_applied = 3;
+  bool k_anonymity_valid  = 4;
+  google.protobuf.Timestamp processed_at = 5;
+}
+
+// ---------------------------------------------------------------------------
+// Deanonymize
+// ---------------------------------------------------------------------------
+
+message DeanonymizeRequest {
+  string tenant_id      = 1;
+  string category       = 2;
+  repeated google.protobuf.Struct records = 3;
+  string requester_id   = 4;
+  string justification  = 5;
+}
+
+// ---------------------------------------------------------------------------
+// DetectPII
+// ---------------------------------------------------------------------------
+
+message DetectPIIRequest {
+  google.protobuf.Struct record = 1;
+}
+
+message DetectPIIResponse {
+  repeated PIIDetection detections = 1;
+  int32 count = 2;
+}
+
+message PIIDetection {
+  string field        = 1;
+  string pii_type     = 2;
+  double confidence   = 3;
+  int32 sensitivity_level = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Classify
+// ---------------------------------------------------------------------------
+
+message ClassifyRequest {
+  repeated google.protobuf.Struct records = 1;
+}
+
+message ClassifyResponse {
+  string category         = 1;
+  repeated PIIDetection detections = 2;
+  int32 k_threshold       = 3;
+  string recommendation   = 4;
+}
+
+// ---------------------------------------------------------------------------
+// K-Anonymity
+// ---------------------------------------------------------------------------
+
+message KAnonymityRequest {
+  repeated google.protobuf.Struct records = 1;
+  string category   = 2;
+  int32 required_k  = 3;
+  bool generalize   = 4;
+}
+
+message KAnonymityReport {
+  bool valid          = 1;
+  int32 k             = 2;
+  int32 required_k    = 3;
+  repeated KAnonymityViolation violations = 4;
+  repeated GeneralizationStep generalization_steps = 5;
+}
+
+message KAnonymityViolation {
+  google.protobuf.Struct quasi_identifiers = 1;
+  int32 group_size    = 2;
+  int32 required_size = 3;
+}
+
+message GeneralizationStep {
+  string field = 1;
+  string from  = 2;
+  string to    = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Break-Glass
+// ---------------------------------------------------------------------------
+
+message BreakGlassRequest {
+  string requester_id   = 1;
+  string incident_id    = 2;
+  string reason         = 3;
+  int64 duration_seconds = 4;
+  string category       = 5;
+}
+
+message ApproveBreakGlassRequest {
+  string request_id   = 1;
+  string approver_id  = 2;
+}
+
+message BreakGlassResponse {
+  string id           = 1;
+  string requester_id = 2;
+  string incident_id  = 3;
+  string reason       = 4;
+  string status       = 5;
+  string token        = 6;
+  google.protobuf.Timestamp expires_at = 7;
+  repeated string approvers = 8;
+}
+
+// ---------------------------------------------------------------------------
+// Access Control
+// ---------------------------------------------------------------------------
+
+message CheckAccessRequest {
+  string user_id      = 1;
+  string tenant_id    = 2;
+  string department   = 3;
+  string role         = 4;
+  string category     = 5;
+  string action       = 6;
+}
+
+message AccessDecision {
+  bool allowed        = 1;
+  string access_level = 2;
+  string reason       = 3;
+  repeated string conditions = 4;
+}

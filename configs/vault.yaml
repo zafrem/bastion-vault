@@ -1,0 +1,54 @@
+server:
+  http_port: 8080
+  grpc_port: 9090
+  host: "0.0.0.0"
+  tls_cert: ""
+  tls_key: ""
+
+kms:
+  provider: local          # local | aws | vault
+  dek_cache_ttl: 5m
+  local:
+    key_dir: ./keys
+    # master_key is a 32-byte hex-encoded AES-256 key.
+    # Generate with: openssl rand -hex 32
+    # In production, load this from a secrets manager, NOT from this file.
+    master_key: ""         # override with VAULT_KMS_LOCAL_MASTER_KEY env var
+  aws:
+    region: ap-northeast-2
+    key_arn: ""
+    profile: ""
+  vault:
+    address: "http://127.0.0.1:8200"
+    token: ""
+    mount_path: transit
+    key_name: bastion-master
+
+database:
+  dsn: "postgres://vault:vault@localhost:5432/bastion_vault?sslmode=disable"
+  max_open_conns: 20
+  max_idle_conns: 5
+  conn_max_lifetime: 30m
+
+cache:
+  address: "redis://localhost:6379"
+  password: ""
+  db: 0
+  ttl: 1h
+
+opa:
+  policy_dir: ./policies
+  bundle_server: ""        # e.g. http://localhost:8181 when OPA runs as a sidecar
+  decision_log: "./audit-logs/opa-decisions.jsonl"
+
+audit:
+  output_dir: ./audit-logs
+  signing_enabled: true
+  retention_days: 365
+
+tenant:
+  default_k_threshold: 5
+
+log:
+  level: info              # debug | info | warn | error
+  format: json             # json | text

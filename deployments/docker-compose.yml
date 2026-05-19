@@ -1,0 +1,84 @@
+version: "3.9"
+
+services:
+  vault:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile
+    image: bastion-vault:dev
+    ports:
+      - "8080:8080"
+      - "9090:9090"
+    environment:
+      VAULT_KMS_LOCAL_MASTER_KEY: "${VAULT_MASTER_KEY}"
+      VAULT_KMS_PROVIDER: local
+      VAULT_DATABASE_DSN: "postgres://vault:vault@postgres:5432/bastion_vault?sslmode=disable"
+      VAULT_CACHE_ADDRESS: "redis://redis:6379"
+      VAULT_OPA_BUNDLE_SERVER: "http://opa:8181"
+      VAULT_LOG_LEVEL: info
+      VAULT_LOG_FORMAT: json
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      opa:
+        condition: service_started
+    volumes:
+      - vault-audit:/audit-logs
+      - vault-keys:/keys
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: vault
+      POSTGRES_PASSWORD: vault
+      POSTGRES_DB: bastion_vault
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vault"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  opa:
+    image: openpolicyagent/opa:0.60.0
+    command:
+      - run
+      - --server
+      - --log-format=json
+      - /policies
+    ports:
+      - "8181:8181"
+    volumes:
+      - ../policies:/policies:ro
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ../deployments/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+
+volumes:
+  pg-data:
+  redis-data:
+  vault-audit:
+  vault-keys:
