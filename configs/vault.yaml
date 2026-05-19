@@ -16,7 +16,7 @@ kms:
     master_key: ""         # override with VAULT_KMS_LOCAL_MASTER_KEY env var
   aws:
     region: ap-northeast-2
-    key_arn: ""
+    master_key_id: ""
     profile: ""
   vault:
     address: "http://127.0.0.1:8200"
@@ -58,3 +58,12 @@ auth:
   jwt_algorithm: HS256
   jwt_issuer: bastion
   skip_auth: false
+
+token_store:
+  driver: memory            # memory | postgres
+  dsn: ""                   # postgres DSN when driver=postgres
+
+rate_limit:
+  enabled: false
+  rps: 100
+  burst: 200

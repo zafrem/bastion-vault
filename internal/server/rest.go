@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/zafrem/bastion-vault/internal/access"
 	"github.com/zafrem/bastion-vault/internal/anonymizer"
@@ -66,6 +67,9 @@ func (s *Server) Router() http.Handler {
 	r.Use(middleware.Recoverer)
 	r.Use(loggingMiddleware)
 	r.Use(metricsMiddleware)
+	if s.cfg.RateLimit.Enabled {
+		r.Use(rateLimitMiddleware(s.cfg.RateLimit.RPS, s.cfg.RateLimit.Burst))
+	}
 	r.Use(authMiddleware(s.cfg))
 	r.Use(tenantMiddleware)
 
@@ -74,6 +78,7 @@ func (s *Server) Router() http.Handler {
 	r.Handle("/v1/metrics", promhttp.Handler())
 
 	r.Post("/v1/vault/anonymize", s.handleAnonymize)
+	r.Post("/v1/vault/anonymize/batch", s.handleAnonymizeBatch)
 	r.Post("/v1/vault/deanonymize", s.handleDeanonymize)
 	r.Post("/v1/vault/classify", s.handleClassify)
 	r.Post("/v1/vault/detect-pii", s.handleDetectPII)
@@ -162,11 +167,85 @@ func (s *Server) handleAnonymize(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := s.engine.Anonymize(r.Context(), &req)
 	if err != nil {
+		anonymizeOpsTotal.With(prometheus.Labels{
+			"category": string(req.Category),
+			"outcome":  "error",
+		}).Inc()
 		jsonError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
+	anonymizeOpsTotal.With(prometheus.Labels{
+		"category": string(req.Category),
+		"outcome":  "success",
+	}).Inc()
+	for strat, n := range resp.Metadata.StrategiesApplied {
+		fieldsAnonymizedTotal.With(prometheus.Labels{"strategy": strat}).Add(float64(n))
+	}
+
 	// If access level requires k-anonymity, generalize until the dataset satisfies K.
+	if decision.AccessLevel == model.AccessKAnonymized {
+		_, generalizedRecords, gerr := s.kanon.ValidateAndGeneralize(r.Context(), resp.Records, req.Category, categoryK(req.Category))
+		if gerr == nil {
+			resp.Records = generalizedRecords
+		}
+	}
+
+	jsonOK(w, resp)
+}
+
+// handleAnonymizeBatch anonymizes a batch of records in a single request.
+// It enforces a maximum batch size and otherwise mirrors handleAnonymize.
+func (s *Server) handleAnonymizeBatch(w http.ResponseWriter, r *http.Request) {
+	const maxBatchSize = 1000
+
+	user := userFromCtx(r.Context())
+	if user == nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	var req model.AnonymizeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, fmt.Sprintf("invalid request body: %v", err), http.StatusBadRequest)
+		return
+	}
+	req.TenantID = tenantFromCtx(r.Context())
+
+	if len(req.Records) > maxBatchSize {
+		jsonError(w, fmt.Sprintf("batch size %d exceeds maximum of %d records", len(req.Records), maxBatchSize), http.StatusBadRequest)
+		return
+	}
+
+	decision, err := s.controller.Decide(r.Context(), user, req.Category)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !decision.Allowed {
+		jsonError(w, decision.Reason, http.StatusForbidden)
+		return
+	}
+	req.AccessLevel = decision.AccessLevel
+
+	resp, err := s.engine.Anonymize(r.Context(), &req)
+	if err != nil {
+		anonymizeOpsTotal.With(prometheus.Labels{
+			"category": string(req.Category),
+			"outcome":  "error",
+		}).Inc()
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	anonymizeOpsTotal.With(prometheus.Labels{
+		"category": string(req.Category),
+		"outcome":  "success",
+	}).Inc()
+	for strat, n := range resp.Metadata.StrategiesApplied {
+		fieldsAnonymizedTotal.With(prometheus.Labels{"strategy": strat}).Add(float64(n))
+	}
+
 	if decision.AccessLevel == model.AccessKAnonymized {
 		_, generalizedRecords, gerr := s.kanon.ValidateAndGeneralize(r.Context(), resp.Records, req.Category, categoryK(req.Category))
 		if gerr == nil {
@@ -208,9 +287,17 @@ func (s *Server) handleDeanonymize(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := s.engine.Deanonymize(r.Context(), &req)
 	if err != nil {
+		deanonymizeOpsTotal.With(prometheus.Labels{
+			"category": string(req.Category),
+			"outcome":  "error",
+		}).Inc()
 		jsonError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	deanonymizeOpsTotal.With(prometheus.Labels{
+		"category": string(req.Category),
+		"outcome":  "success",
+	}).Inc()
 	jsonOK(w, resp)
 }
 
@@ -326,9 +413,11 @@ func (s *Server) handleBGRequest(w http.ResponseWriter, r *http.Request) {
 	duration := time.Duration(body.DurationSecs) * time.Second
 	req, err := s.bgManager.Request(r.Context(), requesterID, body.IncidentID, body.Reason, duration, body.Category)
 	if err != nil {
+		breakGlassRequestsTotal.With(prometheus.Labels{"outcome": "error"}).Inc()
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	breakGlassRequestsTotal.With(prometheus.Labels{"outcome": "created"}).Inc()
 	jsonOK(w, req)
 }
 
@@ -357,6 +446,9 @@ func (s *Server) handleBGApprove(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+	if req.Status == model.BGStatusActive {
+		activeBreakGlassSessions.Inc()
 	}
 	jsonOK(w, req)
 }
@@ -387,6 +479,7 @@ func (s *Server) handleBGRevoke(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	activeBreakGlassSessions.Dec()
 	jsonOK(w, map[string]string{"status": "revoked", "request_id": body.RequestID})
 }
 

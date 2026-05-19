@@ -127,6 +127,10 @@ func newServerCmd() *cobra.Command {
 			}
 			defer aud.Close()
 
+			// Start the audit log retention worker; it sweeps expired logs daily.
+			stopRetention := audit.StartRetentionWorker(cmd.Context(), cfg.Audit.OutputDir, cfg.Audit.Retention)
+			defer stopRetention()
+
 			cls := classification.New()
 			store, err := newTokenStore(cfg)
 			if err != nil {

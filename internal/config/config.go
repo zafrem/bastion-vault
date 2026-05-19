@@ -20,12 +20,20 @@ type Config struct {
 	Log      LogConfig      `mapstructure:"log"`
 	Auth     AuthConfig     `mapstructure:"auth"`
 	TokenStore TokenStoreConfig `mapstructure:"token_store"`
+	RateLimit  RateLimitConfig  `mapstructure:"rate_limit"`
 }
 
 // TokenStoreConfig selects the persistence backend for token mappings.
 type TokenStoreConfig struct {
 	Driver string `mapstructure:"driver"` // "memory" or "postgres"
 	DSN    string `mapstructure:"dsn"`    // postgres DSN when driver=postgres
+}
+
+// RateLimitConfig configures the per-IP token-bucket rate limiter.
+type RateLimitConfig struct {
+	Enabled bool    `mapstructure:"enabled"`
+	RPS     float64 `mapstructure:"rps"`   // requests per second
+	Burst   int     `mapstructure:"burst"` // token bucket burst size
 }
 
 // AuthConfig holds JWT validation settings.
@@ -122,6 +130,9 @@ func Load(cfgFile string) (*Config, error) {
 	v.SetDefault("kms.local.key_dir", "./keys")
 	v.SetDefault("kms.vault.mount_path", "transit")
 	v.SetDefault("token_store.driver", "memory")
+	v.SetDefault("rate_limit.enabled", false)
+	v.SetDefault("rate_limit.rps", 100)
+	v.SetDefault("rate_limit.burst", 200)
 	v.SetDefault("opa.policy_dir", "./policies")
 	v.SetDefault("audit.output_dir", "./audit-logs")
 	v.SetDefault("audit.signing_enabled", true)

@@ -3,14 +3,17 @@ package server
 import (
 	"context"
 	"log"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"golang.org/x/time/rate"
 	"github.com/zafrem/bastion-vault/internal/config"
 	"github.com/zafrem/bastion-vault/internal/model"
 )
@@ -65,6 +68,42 @@ func metricsMiddleware(next http.Handler) http.Handler {
 			"path":   r.URL.Path,
 		}).Observe(time.Since(start).Seconds())
 	})
+}
+
+// rateLimitMiddleware applies a per-client-IP token-bucket rate limiter.
+// Each remote IP gets its own *rate.Limiter; requests that exceed the bucket
+// are rejected with 429 Too Many Requests.
+func rateLimitMiddleware(rps float64, burst int) func(http.Handler) http.Handler {
+	var limiters sync.Map // ip -> *rate.Limiter
+
+	limiterFor := func(ip string) *rate.Limiter {
+		if l, ok := limiters.Load(ip); ok {
+			return l.(*rate.Limiter)
+		}
+		l := rate.NewLimiter(rate.Limit(rps), burst)
+		actual, _ := limiters.LoadOrStore(ip, l)
+		return actual.(*rate.Limiter)
+	}
+
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ip := clientIP(r.RemoteAddr)
+			if !limiterFor(ip).Allow() {
+				jsonError(w, "rate limit exceeded", http.StatusTooManyRequests)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// clientIP strips the port from a RemoteAddr value, returning just the host.
+func clientIP(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return remoteAddr
+	}
+	return host
 }
 
 // isPublicPath returns true for paths that skip authentication.
