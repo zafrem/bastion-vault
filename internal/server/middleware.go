@@ -5,10 +5,14 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/zafrem/bastion-vault/internal/config"
+	"github.com/zafrem/bastion-vault/internal/model"
 )
 
 var (
@@ -63,21 +67,85 @@ func metricsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// authMiddleware validates the Bearer token in the Authorization header.
-// This is a placeholder; in production, validate a JWT signed by the IdP.
-func authMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/health/live" || r.URL.Path == "/v1/health/ready" || r.URL.Path == "/v1/metrics" {
-			next.ServeHTTP(w, r)
-			return
+// isPublicPath returns true for paths that skip authentication.
+func isPublicPath(path string) bool {
+	return path == "/v1/health/live" ||
+		path == "/v1/health/ready" ||
+		path == "/v1/metrics"
+}
+
+// authMiddleware validates a Bearer JWT and injects a *model.User into context.
+// When cfg.Auth.SkipAuth is true (dev mode) a default user is injected instead.
+func authMiddleware(cfg *config.Config) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Health-check and metrics endpoints are always public.
+			if isPublicPath(r.URL.Path) {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			// Dev-mode bypass.
+			if cfg.Auth.SkipAuth {
+				devUser := &model.User{
+					UserID:     "dev",
+					Department: "marketing",
+					Role:       "manager",
+					TenantID:   "default",
+				}
+				ctx := context.WithValue(r.Context(), model.UserContextKey, devUser)
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+
+			// Extract Bearer token.
+			authHeader := r.Header.Get("Authorization")
+			if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
+				jsonError(w, "missing or invalid Authorization header", http.StatusUnauthorized)
+				return
+			}
+			tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
+
+			// Parse and validate JWT.
+			secret := []byte(cfg.Auth.JWTSecret)
+			token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (interface{}, error) {
+				if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+					return nil, jwt.ErrSignatureInvalid
+				}
+				return secret, nil
+			}, jwt.WithIssuer(cfg.Auth.Issuer), jwt.WithExpirationRequired())
+			if err != nil || !token.Valid {
+				jsonError(w, "invalid or expired token", http.StatusUnauthorized)
+				return
+			}
+
+			claims, ok := token.Claims.(jwt.MapClaims)
+			if !ok {
+				jsonError(w, "malformed token claims", http.StatusUnauthorized)
+				return
+			}
+
+			user := &model.User{
+				UserID:     claimString(claims, "sub"),
+				Department: claimString(claims, "dept"),
+				Role:       claimString(claims, "role"),
+				TenantID:   claimString(claims, "tenant"),
+			}
+
+			ctx := context.WithValue(r.Context(), model.UserContextKey, user)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+// claimString safely extracts a string claim from MapClaims.
+func claimString(claims jwt.MapClaims, key string) string {
+	if v, ok := claims[key]; ok {
+		if s, ok := v.(string); ok {
+			return s
 		}
-		token := r.Header.Get("Authorization")
-		if token == "" {
-			jsonError(w, "missing Authorization header", http.StatusUnauthorized)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+	}
+	return ""
 }
 
 type tenantCtxKey struct{}

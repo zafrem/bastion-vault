@@ -2,6 +2,12 @@ package model
 
 import "time"
 
+// contextKey is an unexported type for context keys in this package to avoid collisions.
+type contextKey string
+
+// UserContextKey is the key used to store and retrieve a *User from a request context.
+const UserContextKey contextKey = "vault_user"
+
 // DataCategory identifies the classification of a data set per SRS §3.1
 type DataCategory string
 
@@ -216,10 +222,11 @@ const (
 
 // User carries identity and role information for access control decisions
 type User struct {
-	ID         string      `json:"id"`
-	TenantID   string      `json:"tenant_id"`
-	Department string      `json:"department"`
-	Role       string      `json:"role"`
+	UserID     string            `json:"user_id"`
+	ID         string            `json:"id"` // deprecated: use UserID
+	TenantID   string            `json:"tenant_id"`
+	Department string            `json:"department"`
+	Role       string            `json:"role"`
 	Attributes map[string]string `json:"attributes,omitempty"`
 }
 

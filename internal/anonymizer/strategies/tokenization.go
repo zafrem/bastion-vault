@@ -6,20 +6,32 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
+	"strings"
+	"time"
+
+	"github.com/zafrem/bastion-vault/internal/tokendb"
 )
 
 // TokenizationStrategy implements deterministic tokenization using HMAC-SHA256.
 // The same input always produces the same token, enabling joins on tokenized data.
-// Reversibility requires a token registry (external store); the strategy itself is
-// not directly reversible without that lookup.
-type TokenizationStrategy struct{}
+// When a tokendb.Store is provided, mappings are persisted so that Reverse() can
+// recover the original value; without a store Reverse() returns ErrNotReversible.
+type TokenizationStrategy struct {
+	store tokendb.Store
+}
 
 func NewTokenization() *TokenizationStrategy { return &TokenizationStrategy{} }
 
-func (s *TokenizationStrategy) Name() string       { return "deterministic_tokenization" }
-func (s *TokenizationStrategy) Reversible() bool   { return true }
+// WithStore attaches a token registry; the strategy becomes reversible via lookup.
+func (s *TokenizationStrategy) WithStore(st tokendb.Store) *TokenizationStrategy {
+	s.store = st
+	return s
+}
 
-func (s *TokenizationStrategy) Apply(_ context.Context, value string, p Params) (string, error) {
+func (s *TokenizationStrategy) Name() string     { return "deterministic_tokenization" }
+func (s *TokenizationStrategy) Reversible() bool { return s.store != nil }
+
+func (s *TokenizationStrategy) Apply(ctx context.Context, value string, p Params) (string, error) {
 	if len(p.HMACKey) == 0 {
 		return "", fmt.Errorf("tokenization: HMAC key required")
 	}
@@ -31,11 +43,42 @@ func (s *TokenizationStrategy) Apply(_ context.Context, value string, p Params) 
 	if len(token) > 22 {
 		token = token[:22]
 	}
-	return "TOK:" + token, nil
+	tok := "TOK:" + token
+
+	if s.store != nil {
+		entry := tokendb.Entry{
+			Token:     token,
+			Original:  value,
+			TenantID:  p.TenantID,
+			PIIType:   p.FieldHint,
+			CreatedAt: time.Now().UTC(),
+		}
+		if err := s.store.Put(ctx, entry); err != nil {
+			// Non-fatal: log would go here in production; continue with the token.
+			_ = err
+		}
+	}
+
+	return tok, nil
 }
 
-// Reverse cannot reconstruct the original value from the token alone;
-// the caller must perform a reverse-lookup against the token registry.
-func (s *TokenizationStrategy) Reverse(_ context.Context, value string, _ Params) (string, error) {
-	return "", ErrNotReversible{Strategy: s.Name()}
+// Reverse reconstructs the original value from the token registry.
+// If no store is configured it returns ErrNotReversible.
+func (s *TokenizationStrategy) Reverse(ctx context.Context, value string, p Params) (string, error) {
+	if s.store == nil {
+		return "", ErrNotReversible{Strategy: s.Name()}
+	}
+	// Strip the "TOK:" prefix before looking up.
+	tok := value
+	if strings.HasPrefix(tok, "TOK:") {
+		tok = tok[4:]
+	}
+	entry, err := s.store.Get(ctx, tok, p.TenantID)
+	if err != nil {
+		return "", fmt.Errorf("tokenization: store lookup: %w", err)
+	}
+	if entry == nil {
+		return "", fmt.Errorf("tokenization: token not found in registry")
+	}
+	return entry.Original, nil
 }

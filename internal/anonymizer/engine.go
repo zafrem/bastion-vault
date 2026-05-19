@@ -11,6 +11,7 @@ import (
 	"github.com/zafrem/bastion-vault/internal/classification"
 	"github.com/zafrem/bastion-vault/internal/kms"
 	"github.com/zafrem/bastion-vault/internal/model"
+	"github.com/zafrem/bastion-vault/internal/tokendb"
 )
 
 // fieldPolicy describes which strategy to apply to a PII field
@@ -57,20 +58,26 @@ type Engine struct {
 }
 
 // NewEngine wires up the anonymization engine with all required dependencies.
-func NewEngine(mgr *kms.Manager, cls *classification.Classifier, aud *audit.Logger) *Engine {
+// store may be nil; when provided, deterministic tokenization persists reverse-lookup
+// mappings so that Deanonymize can recover tokenized values.
+func NewEngine(mgr *kms.Manager, cls *classification.Classifier, aud *audit.Logger, store tokendb.Store) *Engine {
+	tok := strategies.NewTokenization()
+	if store != nil {
+		tok = tok.WithStore(store)
+	}
 	return &Engine{
 		kmsManager: mgr,
 		classifier: cls,
 		auditor:    aud,
 		strategyMap: map[model.AnonymizationStrategy]strategies.Strategy{
-			model.StrategyDeterministicTokenization: strategies.NewTokenization(),
+			model.StrategyDeterministicTokenization: tok,
 			model.StrategyHMACSHA256:                strategies.NewHMAC(),
 			model.StrategyPartialMasking:            strategies.NewMasking(),
 			model.StrategyGeneralization:            strategies.NewGeneralization(),
 			model.StrategyRangeGeneralization:       strategies.NewRangeGeneralization(),
 			model.StrategySuppression:               strategies.NewSuppression(),
 			model.StrategyEncryption:                strategies.NewEncryption(),
-			model.StrategyFPEEmail:                  strategies.NewTokenization(), // FPE approximated via tokenization
+			model.StrategyFPEEmail:                  tok, // FPE approximated via tokenization
 		},
 	}
 }
@@ -94,7 +101,7 @@ func (e *Engine) Anonymize(ctx context.Context, req *model.AnonymizeRequest) (*m
 	}
 
 	for _, record := range req.Records {
-		out, fieldsProcessed, stratUsed, err := e.transformRecord(ctx, record, detections, hmacKey, encKey, req.AccessLevel)
+		out, fieldsProcessed, stratUsed, err := e.transformRecord(ctx, record, detections, hmacKey, encKey, req.AccessLevel, req.TenantID)
 		if err != nil {
 			return nil, fmt.Errorf("anonymize: transforming record: %w", err)
 		}
@@ -210,6 +217,7 @@ func (e *Engine) transformRecord(
 	detections map[string]fieldPolicy,
 	hmacKey, encKey []byte,
 	accessLevel model.AccessLevel,
+	tenantID string,
 ) (map[string]any, int, map[string]int, error) {
 	out := make(map[string]any, len(record))
 	fieldsProcessed := 0
@@ -233,6 +241,7 @@ func (e *Engine) transformRecord(
 			HMACKey:       hmacKey,
 			EncryptionKey: encKey,
 			FieldHint:     k,
+			TenantID:      tenantID,
 		}
 
 		transformed, err := strategy.Apply(ctx, strVal, params)

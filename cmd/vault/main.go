@@ -21,6 +21,7 @@ import (
 	"github.com/zafrem/bastion-vault/internal/kms"
 	"github.com/zafrem/bastion-vault/internal/model"
 	"github.com/zafrem/bastion-vault/internal/server"
+	"github.com/zafrem/bastion-vault/internal/tokendb"
 )
 
 var cfgFile string
@@ -81,12 +82,13 @@ func newServerCmd() *cobra.Command {
 			defer aud.Close()
 
 			cls := classification.New()
-			eng := anonymizer.NewEngine(mgr, cls, aud)
+			store := tokendb.NewMemoryStore()
+			eng := anonymizer.NewEngine(mgr, cls, aud, store)
 			ctrl := access.NewController(cfg.OPA.BundleServer)
 			kv := kanon.New()
 			bg := breakglass.NewManager(aud)
 
-			srv := server.New(eng, cls, ctrl, kv, bg, aud)
+			srv := server.New(eng, cls, ctrl, kv, bg, aud, cfg)
 
 			addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.HTTPPort)
 			printBox("Bastion Vault Server", []string{
@@ -126,7 +128,7 @@ func newAnonymizeCmd() *cobra.Command {
 				return err
 			}
 
-			eng := anonymizer.NewEngine(mgr, classification.New(), aud)
+			eng := anonymizer.NewEngine(mgr, classification.New(), aud, tokendb.NewMemoryStore())
 			req := &model.AnonymizeRequest{
 				TenantID:    "cli",
 				Category:    model.DataCategory(category),

@@ -18,6 +18,15 @@ type Config struct {
 	Audit    AuditConfig    `mapstructure:"audit"`
 	Tenant   TenantSettings `mapstructure:"tenant"`
 	Log      LogConfig      `mapstructure:"log"`
+	Auth     AuthConfig     `mapstructure:"auth"`
+}
+
+// AuthConfig holds JWT validation settings.
+type AuthConfig struct {
+	JWTSecret    string `mapstructure:"jwt_secret"`
+	JWTAlgorithm string `mapstructure:"jwt_algorithm"` // HS256 or RS256
+	Issuer       string `mapstructure:"jwt_issuer"`
+	SkipAuth     bool   `mapstructure:"skip_auth"` // dev mode only
 }
 
 type ServerConfig struct {
@@ -97,6 +106,10 @@ func Load(cfgFile string) (*Config, error) {
 	v.SetDefault("server.http_port", 8080)
 	v.SetDefault("server.grpc_port", 9090)
 	v.SetDefault("server.host", "0.0.0.0")
+	v.SetDefault("auth.jwt_secret", "change-me-in-production")
+	v.SetDefault("auth.jwt_algorithm", "HS256")
+	v.SetDefault("auth.jwt_issuer", "bastion")
+	v.SetDefault("auth.skip_auth", false)
 	v.SetDefault("kms.provider", "local")
 	v.SetDefault("kms.dek_cache_ttl", 5*time.Minute)
 	v.SetDefault("kms.local.key_dir", "./keys")

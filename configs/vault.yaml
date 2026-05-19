@@ -52,3 +52,9 @@ tenant:
 log:
   level: info              # debug | info | warn | error
   format: json             # json | text
+
+auth:
+  jwt_secret: "change-me-in-production"
+  jwt_algorithm: HS256
+  jwt_issuer: bastion
+  skip_auth: false

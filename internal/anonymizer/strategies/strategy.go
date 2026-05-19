@@ -38,6 +38,10 @@ type Params struct {
 
 	// FieldHint carries the field name so strategies can pick appropriate defaults.
 	FieldHint string
+
+	// TenantID scopes token registry lookups to the owning tenant.
+	// Strategies that do not use the token registry can leave this empty.
+	TenantID string
 }
 
 // ErrNotReversible is returned when Reverse is called on a one-way strategy.
