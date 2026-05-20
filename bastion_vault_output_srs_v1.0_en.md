@@ -153,46 +153,46 @@ Principle 4: Verifiability
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│              User Query                               │
+│              User Query                              │
 └────────────────────────┬─────────────────────────────┘
                          ▼
         ┌────────────────────────────────────┐
-        │   Sentinel-IN (Input Validation)    │
+        │   Sentinel-IN (Input Validation)   │
         └────────────────┬───────────────────┘
                          ▼
         ┌────────────────────────────────────┐
-        │   Vault-IN (Anonymization)          │
-        │   - Phase 1                         │
+        │   Vault-IN (Anonymization)         │
+        │   - Phase 1                        │
         └────────────────┬───────────────────┘
                          ▼
         ┌────────────────────────────────────┐
-        │   Navigator (Search)                │
+        │   Navigator (Search)               │
         └────────────────┬───────────────────┘
                          ▼
         ┌────────────────────────────────────┐
-        │   Anchor-IN (Embedding Security)    │
+        │   Anchor-IN (Embedding Security)   │
         └────────────────┬───────────────────┘
                          ▼
                         LLM
                          ▼
         ┌────────────────────────────────────┐
-        │   Anchor-OUT (Bias Check)           │
+        │   Anchor-OUT (Bias Check)          │
         └────────────────┬───────────────────┘
                          ▼
         ┌────────────────────────────────────┐
-        │   Vault-OUT  ◄── (This doc)         │
-        │   - Phase 2                         │
-        │   - Permission Re-application       │
-        │   - K-anonymity Verification        │
-        │   - Inference Attack Detection      │
+        │   Vault-OUT  ◄── (This doc)        │
+        │   - Phase 2                        │
+        │   - Permission Re-application      │
+        │   - K-anonymity Verification       │
+        │   - Inference Attack Detection     │
         └────────────────┬───────────────────┘
                          ▼
         ┌────────────────────────────────────┐
-        │   Sentinel-OUT (Output Validation)  │
+        │   Sentinel-OUT (Output Validation) │
         └────────────────┬───────────────────┘
                          ▼
         ┌────────────────────────────────────┐
-        │           User Response             │
+        │           User Response            │
         └────────────────────────────────────┘
 ```
 
@@ -202,42 +202,42 @@ Vault operates as a single service with two phases:
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│              Unified Vault Service                   │
+│              Unified Vault Service                  │
 ├─────────────────────────────────────────────────────┤
-│                                                      │
-│  ┌──────────────────────────────────────────────┐  │
-│  │           Vault Engine (Shared)              │  │
-│  │  ┌──────────┐ ┌──────────┐ ┌──────────────┐ │  │
-│  │  │ Encrypt/ │ │ Tokenize │ │  Hash/HMAC   │ │  │
-│  │  │ Decrypt  │ │ Manager  │ │   Engine     │ │  │
-│  │  └──────────┘ └──────────┘ └──────────────┘ │  │
-│  └──────────┬───────────────────────────────────┘  │
-│             │                                       │
-│  ┌──────────┴────────────────────────────────┐    │
-│  │     Configuration & Policies              │    │
-│  │  ┌────────────────────────────────────┐  │    │
-│  │  │ Phase 1 Config (Input)             │  │    │
-│  │  │ - Anonymization Strategies         │  │    │
-│  │  │ - PII Type Mappings                │  │    │
-│  │  │ - Storage Encryption               │  │    │
-│  │  └────────────────────────────────────┘  │    │
-│  │  ┌────────────────────────────────────┐  │    │
-│  │  │ Phase 2 Config (Output) ⭐         │  │    │
-│  │  │ - Access Level Rules               │  │    │
-│  │  │ - Permission Matrices              │  │    │
-│  │  │ - K-anonymity Parameters           │  │    │
-│  │  │ - Slice Definitions                │  │    │
-│  │  │ - Inference Attack Detection       │  │    │
-│  │  └────────────────────────────────────┘  │    │
-│  └─────────────────────────────────────────────┘  │
 │                                                     │
-│  ┌──────────────────────────────────────────────┐  │
-│  │       Storage & Integration Layer            │  │
-│  │  ┌──────────┐ ┌──────────┐ ┌──────────────┐ │  │
-│  │  │   KMS    │ │ Token DB │ │   OPA Policy │ │  │
-│  │  │(AWS/HC)  │ │(Postgres)│ │   Engine     │ │  │
-│  │  └──────────┘ └──────────┘ └──────────────┘ │  │
-│  └──────────────────────────────────────────────┘  │
+│  ┌──────────────────────────────────────────────┐   │
+│  │           Vault Engine (Shared)              │   │
+│  │  ┌──────────┐ ┌──────────┐ ┌──────────────┐  │   │
+│  │  │ Encrypt/ │ │ Tokenize │ │  Hash/HMAC   │  │   │
+│  │  │ Decrypt  │ │ Manager  │ │   Engine     │  │   │
+│  │  └──────────┘ └──────────┘ └──────────────┘  │   │
+│  └──────────┬───────────────────────────────────┘   │
+│             │                                       │
+│  ┌──────────┴────────────────────────────────┐      │
+│  │     Configuration & Policies              │      │
+│  │  ┌────────────────────────────────────┐   │      │
+│  │  │ Phase 1 Config (Input)             │   │      │
+│  │  │ - Anonymization Strategies         │   │      │
+│  │  │ - PII Type Mappings                │   │      │
+│  │  │ - Storage Encryption               │   │      │
+│  │  └────────────────────────────────────┘   │      │
+│  │  ┌────────────────────────────────────┐   │      │
+│  │  │ Phase 2 Config (Output) ⭐         │   │      │
+│  │  │ - Access Level Rules               │   │      │
+│  │  │ - Permission Matrices              │   │      │
+│  │  │ - K-anonymity Parameters           │   │      │
+│  │  │ - Slice Definitions                │   │      │
+│  │  │ - Inference Attack Detection       │   │      │
+│  │  └────────────────────────────────────┘   │      │
+│  └───────────────────────────────────────────┘      │
+│                                                     │
+│  ┌──────────────────────────────────────────────┐   │
+│  │       Storage & Integration Layer            │   │
+│  │  ┌──────────┐ ┌──────────┐ ┌──────────────┐  │   │
+│  │  │   KMS    │ │ Token DB │ │   OPA Policy │  │   │
+│  │  │(AWS/HC)  │ │(Postgres)│ │   Engine     │  │   │
+│  │  └──────────┘ └──────────┘ └──────────────┘  │   │
+│  └──────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────┘
 ```
 
