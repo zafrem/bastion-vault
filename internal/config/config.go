@@ -25,8 +25,8 @@ type Config struct {
 
 // TokenStoreConfig selects the persistence backend for token mappings.
 type TokenStoreConfig struct {
-	Driver string `mapstructure:"driver"` // "memory" or "postgres"
-	DSN    string `mapstructure:"dsn"`    // postgres DSN when driver=postgres
+	Driver string `mapstructure:"driver"` // "memory", "postgres", or "sqlite"
+	DSN    string `mapstructure:"dsn"`    // postgres DSN or sqlite file path when driver=postgres/sqlite
 }
 
 // RateLimitConfig configures the per-IP token-bucket rate limiter.
