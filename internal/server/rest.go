@@ -19,6 +19,7 @@ import (
 	"github.com/zafrem/bastion-vault/internal/config"
 	"github.com/zafrem/bastion-vault/internal/kanon"
 	"github.com/zafrem/bastion-vault/internal/model"
+	"github.com/zafrem/bastion-vault/internal/output"
 	"github.com/zafrem/bastion-vault/internal/tokendb"
 )
 
@@ -31,11 +32,13 @@ type Server struct {
 	bgManager  *breakglass.Manager
 	auditor    *audit.Logger
 	tokenStore tokendb.Store
+	processor  *output.Processor
 	cfg        *config.Config
 	startTime  time.Time
 }
 
-// New constructs a Server from its service dependencies.
+// New constructs a Server from its service dependencies. processor may be nil
+// (only the Phase 2 endpoints are affected — they will return 503).
 func New(
 	eng *anonymizer.Engine,
 	cls *classification.Classifier,
@@ -44,6 +47,7 @@ func New(
 	bg *breakglass.Manager,
 	aud *audit.Logger,
 	store tokendb.Store,
+	processor *output.Processor,
 	cfg *config.Config,
 ) *Server {
 	return &Server{
@@ -54,6 +58,7 @@ func New(
 		bgManager:  bg,
 		auditor:    aud,
 		tokenStore: store,
+		processor:  processor,
 		cfg:        cfg,
 		startTime:  time.Now(),
 	}
@@ -87,6 +92,14 @@ func (s *Server) Router() http.Handler {
 	r.Post("/v1/vault/break-glass/approve", s.handleBGApprove)
 	r.Post("/v1/vault/break-glass/revoke", s.handleBGRevoke)
 	r.Get("/v1/vault/break-glass/{id}", s.handleBGStatus)
+
+	// Phase 2 (Vault-OUT) endpoints
+	r.Post("/v1/vault/apply-permissions", s.handleApplyPermissions)
+	r.Post("/v1/vault/resolve-tokens", s.handleResolveTokens)
+	r.Post("/v1/vault/verify-access", s.handleVerifyAccess)
+	r.Post("/v1/vault/validate-output-set", s.handleValidateOutputSet)
+	r.Post("/v1/vault/detect-inference", s.handleDetectInference)
+	r.Post("/v1/vault/process", s.handleProcess)
 
 	r.Delete("/v1/vault/tokens", s.handleErasure)
 
@@ -658,6 +671,291 @@ func (s *Server) handleAuditLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, map[string]any{"entries": entries, "count": len(entries)})
+}
+
+// ---------- Phase 2 (Vault-OUT) handlers ----------
+
+// userCtxFromAuth materialises a *model.UserContext from the authenticated request
+// context, layering on whatever the request body explicitly supplied (department,
+// roles, slice). The tenant_id is always taken from the auth context for safety.
+func userCtxFromAuth(authUser *model.User, supplied *model.UserContext) *model.UserContext {
+	uc := &model.UserContext{
+		UserID:     authUser.UserID,
+		TenantID:   authUser.TenantID,
+		Department: authUser.Department,
+		Roles:      []string{authUser.Role},
+	}
+	if uc.UserID == "" {
+		uc.UserID = authUser.ID
+	}
+	if supplied != nil {
+		if supplied.Department != "" {
+			uc.Department = supplied.Department
+		}
+		if len(supplied.Roles) > 0 {
+			uc.Roles = supplied.Roles
+		}
+		uc.AllowedCategories = supplied.AllowedCategories
+		uc.AccessLevel = supplied.AccessLevel
+		uc.Slice = supplied.Slice
+	}
+	return uc
+}
+
+// handleApplyPermissions runs the Phase 2 pipeline minus token resolution. This is
+// the primary read-time view endpoint.
+func (s *Server) handleApplyPermissions(w http.ResponseWriter, r *http.Request) {
+	user := userFromCtx(r.Context())
+	if user == nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if s.processor == nil {
+		jsonError(w, "phase 2 processor not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	var body struct {
+		User     *model.UserContext  `json:"user,omitempty"`
+		Records  []model.DataRecord  `json:"records"`
+		Category model.DataCategory  `json:"category"`
+		Query    output.QueryParams  `json:"query,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, fmt.Sprintf("invalid request body: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	uc := userCtxFromAuth(user, body.User)
+	body.Query.Category = body.Category
+
+	resp, err := s.processor.ApplyPermissions(r.Context(), output.ProcessRequest{
+		RequestID: r.Header.Get("X-Request-ID"),
+		User:      uc,
+		Records:   body.Records,
+		Category:  body.Category,
+		Query:     body.Query,
+	})
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, resp)
+}
+
+// handleResolveTokens performs ONLY the selective token-resolution step. The caller
+// must have deanonymize rights for the record's category.
+func (s *Server) handleResolveTokens(w http.ResponseWriter, r *http.Request) {
+	user := userFromCtx(r.Context())
+	if user == nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if s.processor == nil {
+		jsonError(w, "phase 2 processor not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	var body struct {
+		User    *model.UserContext `json:"user,omitempty"`
+		Records []model.DataRecord `json:"records"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, fmt.Sprintf("invalid request body: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	uc := userCtxFromAuth(user, body.User)
+
+	// Per-record deanonymize check (use the first record's category as the gate;
+	// mixed-category batches should be split by the caller).
+	if len(body.Records) > 0 {
+		category := body.Records[0].Category
+		role := ""
+		if len(uc.Roles) > 0 {
+			role = uc.Roles[0]
+		}
+		if !s.controller.CanDeanonymize(&model.User{
+			UserID:     uc.UserID,
+			TenantID:   uc.TenantID,
+			Department: uc.Department,
+			Role:       role,
+		}, category) {
+			jsonError(w, "deanonymize not permitted for your role", http.StatusForbidden)
+			return
+		}
+	}
+
+	resolved, err := s.processor.ResolveTokens(r.Context(), body.Records, uc)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]any{"resolved_records": resolved})
+}
+
+// handleVerifyAccess returns the access decision for the user against a category
+// without transforming any records.
+func (s *Server) handleVerifyAccess(w http.ResponseWriter, r *http.Request) {
+	user := userFromCtx(r.Context())
+	if user == nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if s.processor == nil {
+		jsonError(w, "phase 2 processor not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	var body struct {
+		Category model.DataCategory `json:"category"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, fmt.Sprintf("invalid request body: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	uc := userCtxFromAuth(user, nil)
+	decision, err := s.processor.VerifyAccess(r.Context(), uc, body.Category)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]any{
+		"allowed":      decision.Allowed,
+		"access_level": string(decision.AccessLevel),
+		"reason":       decision.Reason,
+	})
+}
+
+// handleValidateOutputSet validates k-anonymity for a posted record set.
+func (s *Server) handleValidateOutputSet(w http.ResponseWriter, r *http.Request) {
+	user := userFromCtx(r.Context())
+	if user == nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if s.processor == nil {
+		jsonError(w, "phase 2 processor not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	var body struct {
+		Records    []model.DataRecord `json:"records"`
+		KThreshold int                `json:"k_threshold"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, fmt.Sprintf("invalid request body: %v", err), http.StatusBadRequest)
+		return
+	}
+	if body.KThreshold <= 0 {
+		body.KThreshold = 5
+	}
+	if len(body.Records) == 0 {
+		jsonOK(w, map[string]any{"valid": true, "violations": []any{}, "min_group_size": 0})
+		return
+	}
+
+	// Flatten DataRecord.Fields into the map shape the validator wants.
+	flat := make([]map[string]any, 0, len(body.Records))
+	for _, rec := range body.Records {
+		m := make(map[string]any, len(rec.Fields))
+		for k, v := range rec.Fields {
+			m[k] = v.Value
+		}
+		flat = append(flat, m)
+	}
+	category := body.Records[0].Category
+	report, err := s.processor.KAnonValidator().Validate(r.Context(), flat, category, body.KThreshold)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	jsonOK(w, map[string]any{
+		"valid":          report.Valid,
+		"violations":     report.Violations,
+		"min_group_size": report.K,
+		"required_k":     report.RequiredK,
+	})
+}
+
+// handleDetectInference runs the inference-attack detector on a query without
+// modifying the user's history beyond the current call.
+func (s *Server) handleDetectInference(w http.ResponseWriter, r *http.Request) {
+	user := userFromCtx(r.Context())
+	if user == nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if s.processor == nil {
+		jsonError(w, "phase 2 processor not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	var body struct {
+		Category            model.DataCategory `json:"category"`
+		Filters             map[string]string  `json:"filters"`
+		ExpectedResultCount int                `json:"expected_result_count"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, fmt.Sprintf("invalid request body: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	uc := userCtxFromAuth(user, nil)
+	risk, err := s.processor.InferenceDetector().Detect(r.Context(), uc, output.QueryParams{
+		Category:            body.Category,
+		Filters:             body.Filters,
+		ExpectedResultCount: body.ExpectedResultCount,
+	})
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, risk)
+}
+
+// handleProcess runs the full Phase 2 pipeline including (when permitted) token
+// resolution.
+func (s *Server) handleProcess(w http.ResponseWriter, r *http.Request) {
+	user := userFromCtx(r.Context())
+	if user == nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if s.processor == nil {
+		jsonError(w, "phase 2 processor not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	var body struct {
+		RequestID string             `json:"request_id"`
+		User      *model.UserContext `json:"user,omitempty"`
+		Records   []model.DataRecord `json:"records"`
+		Category  model.DataCategory `json:"category"`
+		Query     output.QueryParams `json:"query,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, fmt.Sprintf("invalid request body: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	uc := userCtxFromAuth(user, body.User)
+	body.Query.Category = body.Category
+
+	resp, err := s.processor.Process(r.Context(), output.ProcessRequest{
+		RequestID: body.RequestID,
+		User:      uc,
+		Records:   body.Records,
+		Category:  body.Category,
+		Query:     body.Query,
+	})
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, resp)
 }
 
 func jsonOK(w http.ResponseWriter, v any) {

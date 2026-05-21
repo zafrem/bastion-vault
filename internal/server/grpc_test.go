@@ -32,7 +32,7 @@ func testGRPCServer(t *testing.T) *GRPCServer {
 	cls := classification.New()
 	eng := anonymizer.NewEngine(mgr, cls, aud, tokendb.NewMemoryStore())
 	kv := kanon.New()
-	return NewGRPCServer(eng, cls, kv, aud)
+	return NewGRPCServer(eng, cls, kv, aud, nil)
 }
 
 // callMethod invokes a gRPC method handler by name without a network connection.

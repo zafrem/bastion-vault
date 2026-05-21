@@ -28,6 +28,7 @@ import (
 	"github.com/zafrem/bastion-vault/internal/kanon"
 	"github.com/zafrem/bastion-vault/internal/kms"
 	"github.com/zafrem/bastion-vault/internal/model"
+	"github.com/zafrem/bastion-vault/internal/output"
 	"github.com/zafrem/bastion-vault/internal/server"
 	"github.com/zafrem/bastion-vault/internal/tokendb"
 )
@@ -51,6 +52,9 @@ func main() {
 		newKAnonCheckCmd(),
 		newAccessCmd(),
 		newInteractiveCmd(),
+		newApplyPermissionsCmd(),
+		newResolveTokensCmd(),
+		newVerifyAccessCmd(),
 	)
 
 	if err := root.Execute(); err != nil {
@@ -59,7 +63,7 @@ func main() {
 	}
 }
 
-func loadDeps(cfg *config.Config) (*kms.Manager, *audit.Logger, error) {
+func loadDeps(cfg *config.Config) (*kms.Manager, kms.Provider, *audit.Logger, error) {
 	ctx := context.Background()
 
 	var provider kms.Provider
@@ -67,7 +71,7 @@ func loadDeps(cfg *config.Config) (*kms.Manager, *audit.Logger, error) {
 	case "aws":
 		p, err := kms.NewAWSProvider(ctx, cfg.KMS.AWS.Region, cfg.KMS.AWS.MasterKeyID)
 		if err != nil {
-			return nil, nil, fmt.Errorf("KMS init (aws): %w", err)
+			return nil, nil, nil, fmt.Errorf("KMS init (aws): %w", err)
 		}
 		provider = p
 	case "vault":
@@ -75,7 +79,7 @@ func loadDeps(cfg *config.Config) (*kms.Manager, *audit.Logger, error) {
 	default: // "local"
 		p, err := kms.NewLocalProvider(cfg.KMS.Local.KeyDir, cfg.KMS.Local.MasterKey)
 		if err != nil {
-			return nil, nil, fmt.Errorf("KMS init (local): %w", err)
+			return nil, nil, nil, fmt.Errorf("KMS init (local): %w", err)
 		}
 		provider = p
 	}
@@ -87,16 +91,16 @@ func loadDeps(cfg *config.Config) (*kms.Manager, *audit.Logger, error) {
 	if cfg.Audit.SigningEnabled {
 		sk, kerr := provider.GenerateHMACKey(ctx, "audit-signing-key")
 		if kerr != nil {
-			return nil, nil, fmt.Errorf("audit signing key: %w", kerr)
+			return nil, nil, nil, fmt.Errorf("audit signing key: %w", kerr)
 		}
 		signingKey = sk
 	}
 
 	aud, err := audit.NewLogger(cfg.Audit.OutputDir, cfg.Audit.SigningEnabled, signingKey)
 	if err != nil {
-		return nil, nil, fmt.Errorf("audit logger init: %w", err)
+		return nil, nil, nil, fmt.Errorf("audit logger init: %w", err)
 	}
-	return mgr, aud, nil
+	return mgr, provider, aud, nil
 }
 
 // newTokenStore builds the token persistence backend from configuration.
@@ -121,7 +125,7 @@ func newServerCmd() *cobra.Command {
 				return err
 			}
 
-			mgr, aud, err := loadDeps(cfg)
+			mgr, provider, aud, err := loadDeps(cfg)
 			if err != nil {
 				return err
 			}
@@ -141,7 +145,11 @@ func newServerCmd() *cobra.Command {
 			kv := kanon.New()
 			bg := breakglass.NewManager(aud)
 
-			httpSrv := server.New(eng, cls, ctrl, kv, bg, aud, store, cfg)
+			// Phase 2 (Vault-OUT) processor: ties together permission resolution,
+			// view generation, token resolution, inference detection, and auditing.
+			processor := output.NewProcessor(ctrl, aud, store, provider)
+
+			httpSrv := server.New(eng, cls, ctrl, kv, bg, aud, store, processor, cfg)
 
 			httpAddr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.HTTPPort)
 			grpcAddr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.GRPCPort)
@@ -165,7 +173,7 @@ func newServerCmd() *cobra.Command {
 
 			// Start gRPC server in background goroutine.
 			grpcSrv := grpc.NewServer()
-			grpcImpl := server.NewGRPCServer(eng, cls, kv, aud)
+			grpcImpl := server.NewGRPCServer(eng, cls, kv, aud, processor)
 			grpcImpl.Register(grpcSrv)
 
 			grpcLis, err := net.Listen("tcp", grpcAddr)
@@ -214,7 +222,7 @@ func newAnonymizeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			mgr, aud, err := loadDeps(cfg)
+			mgr, _, aud, err := loadDeps(cfg)
 			if err != nil {
 				return err
 			}
@@ -436,6 +444,134 @@ func newInteractiveCmd() *cobra.Command {
 			}
 			return nil
 		},
+	}
+}
+
+// ---------- Phase 2 (Vault-OUT) CLI commands ----------
+
+// newApplyPermissionsCmd reads a JSON request from stdin and POSTs it to the
+// Vault-OUT apply-permissions endpoint, printing the response.
+func newApplyPermissionsCmd() *cobra.Command {
+	var endpoint string
+	var token string
+	cmd := &cobra.Command{
+		Use:   "apply-permissions",
+		Short: "Phase 2 — apply permission-based view to records (reads JSON body from stdin)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return postJSONStdin(endpoint+"/v1/vault/apply-permissions", token)
+		},
+	}
+	cmd.Flags().StringVarP(&endpoint, "endpoint", "e", "http://localhost:8080", "vault server base URL")
+	cmd.Flags().StringVar(&token, "token", "", "Bearer JWT (optional in dev mode)")
+	return cmd
+}
+
+// newResolveTokensCmd reads a JSON body from stdin and POSTs it to the Vault-OUT
+// resolve-tokens endpoint.
+func newResolveTokensCmd() *cobra.Command {
+	var endpoint string
+	var token string
+	cmd := &cobra.Command{
+		Use:   "resolve-tokens",
+		Short: "Phase 2 — selectively resolve tokens to originals (reads JSON body from stdin)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return postJSONStdin(endpoint+"/v1/vault/resolve-tokens", token)
+		},
+	}
+	cmd.Flags().StringVarP(&endpoint, "endpoint", "e", "http://localhost:8080", "vault server base URL")
+	cmd.Flags().StringVar(&token, "token", "", "Bearer JWT (optional in dev mode)")
+	return cmd
+}
+
+// newVerifyAccessCmd calls the Vault-OUT verify-access endpoint with a category.
+func newVerifyAccessCmd() *cobra.Command {
+	var (
+		endpoint string
+		token    string
+		category string
+	)
+	cmd := &cobra.Command{
+		Use:   "verify-access",
+		Short: "Phase 2 — verify the caller's access level for a data category",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			body, err := json.Marshal(map[string]string{"category": category})
+			if err != nil {
+				return err
+			}
+			return postJSONBody(endpoint+"/v1/vault/verify-access", token, body)
+		},
+	}
+	cmd.Flags().StringVarP(&endpoint, "endpoint", "e", "http://localhost:8080", "vault server base URL")
+	cmd.Flags().StringVar(&token, "token", "", "Bearer JWT (optional in dev mode)")
+	cmd.Flags().StringVar(&category, "category", "DC-01", "data category")
+	return cmd
+}
+
+// postJSONStdin reads the entire stdin as the request body and posts it to url.
+func postJSONStdin(url, token string) error {
+	body, err := readAllStdin()
+	if err != nil {
+		return err
+	}
+	return postJSONBody(url, token, body)
+}
+
+// postJSONBody POSTs body to url and prints the response.
+func postJSONBody(url, token string, body []byte) error {
+	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(string(body)))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("HTTP request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := readAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("HTTP %d\n", resp.StatusCode)
+	fmt.Println(string(respBody))
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("server returned status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func readAllStdin() ([]byte, error) {
+	scanner := bufio.NewScanner(os.Stdin)
+	scanner.Buffer(make([]byte, 1024*1024), 64*1024*1024)
+	var out []byte
+	for scanner.Scan() {
+		out = append(out, scanner.Bytes()...)
+		out = append(out, '\n')
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func readAll(r interface{ Read(p []byte) (int, error) }) ([]byte, error) {
+	buf := make([]byte, 0, 4096)
+	tmp := make([]byte, 4096)
+	for {
+		n, err := r.Read(tmp)
+		if n > 0 {
+			buf = append(buf, tmp[:n]...)
+		}
+		if err != nil {
+			if err.Error() == "EOF" {
+				return buf, nil
+			}
+			return buf, err
+		}
 	}
 }
 

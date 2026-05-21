@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/encoding"
@@ -12,6 +13,7 @@ import (
 	"github.com/zafrem/bastion-vault/internal/classification"
 	"github.com/zafrem/bastion-vault/internal/kanon"
 	"github.com/zafrem/bastion-vault/internal/model"
+	"github.com/zafrem/bastion-vault/internal/output"
 )
 
 func init() {
@@ -26,6 +28,10 @@ type JSONCodec struct{}
 func (JSONCodec) Marshal(v any) ([]byte, error)        { return json.Marshal(v) }
 func (JSONCodec) Unmarshal(data []byte, v any) error   { return json.Unmarshal(data, v) }
 func (JSONCodec) Name() string                          { return "proto" } // override default codec
+
+// errPhase2NotConfigured is returned by Phase 2 gRPC methods when the processor
+// dependency was not wired (e.g. in tests that only exercise Phase 1).
+var errPhase2NotConfigured = errors.New("phase 2 processor not configured")
 
 // ---------- request / response structs ----------
 
@@ -74,15 +80,18 @@ type GRPCServer struct {
 	classifier *classification.Classifier
 	kanon      *kanon.Validator
 	auditor    *audit.Logger
+	processor  *output.Processor
 }
 
-// NewGRPCServer creates a GRPCServer with the given dependencies.
-func NewGRPCServer(eng *anonymizer.Engine, cls *classification.Classifier, kv *kanon.Validator, aud *audit.Logger) *GRPCServer {
+// NewGRPCServer creates a GRPCServer with the given dependencies. processor may
+// be nil; the Phase 2 gRPC methods will then return an error.
+func NewGRPCServer(eng *anonymizer.Engine, cls *classification.Classifier, kv *kanon.Validator, aud *audit.Logger, processor *output.Processor) *GRPCServer {
 	return &GRPCServer{
 		engine:     eng,
 		classifier: cls,
 		kanon:      kv,
 		auditor:    aud,
+		processor:  processor,
 	}
 }
 
@@ -199,6 +208,103 @@ func (g *GRPCServer) health(ctx context.Context, dec func(any) error, intercepto
 	return handler(ctx, &req)
 }
 
+// ---------- Phase 2 gRPC handlers ----------
+
+type grpcApplyPermissionsRequest struct {
+	RequestID string             `json:"request_id"`
+	User      *model.UserContext `json:"user"`
+	Records   []model.DataRecord `json:"records"`
+	Category  model.DataCategory `json:"category"`
+	Query     output.QueryParams `json:"query,omitempty"`
+}
+
+type grpcResolveTokensRequest struct {
+	User    *model.UserContext `json:"user"`
+	Records []model.DataRecord `json:"records"`
+}
+
+type grpcVerifyAccessRequest struct {
+	User     *model.UserContext `json:"user"`
+	Category model.DataCategory `json:"category"`
+}
+
+func (g *GRPCServer) applyPermissions(ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	var req grpcApplyPermissionsRequest
+	if err := dec(&req); err != nil {
+		return nil, err
+	}
+	handler := func(ctx context.Context, req any) (any, error) {
+		r := req.(*grpcApplyPermissionsRequest)
+		if g.processor == nil {
+			return nil, errPhase2NotConfigured
+		}
+		r.Query.Category = r.Category
+		return g.processor.ApplyPermissions(ctx, output.ProcessRequest{
+			RequestID: r.RequestID,
+			User:      r.User,
+			Records:   r.Records,
+			Category:  r.Category,
+			Query:     r.Query,
+		})
+	}
+	if interceptor != nil {
+		return interceptor(ctx, &req, &grpc.UnaryServerInfo{Server: g, FullMethod: "/bastion.vault.v1.VaultService/ApplyPermissions"}, handler)
+	}
+	return handler(ctx, &req)
+}
+
+func (g *GRPCServer) resolveTokens(ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	var req grpcResolveTokensRequest
+	if err := dec(&req); err != nil {
+		return nil, err
+	}
+	handler := func(ctx context.Context, req any) (any, error) {
+		r := req.(*grpcResolveTokensRequest)
+		if g.processor == nil {
+			return nil, errPhase2NotConfigured
+		}
+		resolved, err := g.processor.ResolveTokens(ctx, r.Records, r.User)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"resolved_records": resolved}, nil
+	}
+	if interceptor != nil {
+		return interceptor(ctx, &req, &grpc.UnaryServerInfo{Server: g, FullMethod: "/bastion.vault.v1.VaultService/ResolveTokens"}, handler)
+	}
+	return handler(ctx, &req)
+}
+
+func (g *GRPCServer) detectInference(ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	var req grpcVerifyAccessRequest
+	if err := dec(&req); err != nil {
+		return nil, err
+	}
+	handler := func(ctx context.Context, req any) (any, error) {
+		r := req.(*grpcVerifyAccessRequest)
+		if g.processor == nil {
+			return nil, errPhase2NotConfigured
+		}
+		return g.processor.VerifyAccess(ctx, r.User, r.Category)
+	}
+	if interceptor != nil {
+		return interceptor(ctx, &req, &grpc.UnaryServerInfo{Server: g, FullMethod: "/bastion.vault.v1.VaultService/DetectInference"}, handler)
+	}
+	return handler(ctx, &req)
+}
+
+func applyPermissionsHandler(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	return srv.(*GRPCServer).applyPermissions(ctx, dec, interceptor)
+}
+
+func resolveTokensHandler(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	return srv.(*GRPCServer).resolveTokens(ctx, dec, interceptor)
+}
+
+func detectInferenceHandler(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	return srv.(*GRPCServer).detectInference(ctx, dec, interceptor)
+}
+
 // ---------- ServiceDesc ----------
 
 func anonymizeHandler(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
@@ -235,6 +341,10 @@ var vaultServiceDesc = grpc.ServiceDesc{
 		{MethodName: "DetectPII", Handler: detectPIIHandler},
 		{MethodName: "ValidateKAnon", Handler: validateKAnonHandler},
 		{MethodName: "Health", Handler: healthHandler},
+		// Phase 2 (Vault-OUT) methods
+		{MethodName: "ApplyPermissions", Handler: applyPermissionsHandler},
+		{MethodName: "ResolveTokens", Handler: resolveTokensHandler},
+		{MethodName: "DetectInference", Handler: detectInferenceHandler},
 	},
 	Streams: []grpc.StreamDesc{},
 }

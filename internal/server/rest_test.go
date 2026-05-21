@@ -18,6 +18,7 @@ import (
 	"github.com/zafrem/bastion-vault/internal/kanon"
 	"github.com/zafrem/bastion-vault/internal/kms"
 	"github.com/zafrem/bastion-vault/internal/model"
+	"github.com/zafrem/bastion-vault/internal/output"
 	"github.com/zafrem/bastion-vault/internal/tokendb"
 )
 
@@ -42,7 +43,8 @@ func testServer(t *testing.T, cfg *config.Config) *Server {
 	ctrl := access.NewController("")
 	kv := kanon.New()
 	bg := breakglass.NewManager(aud)
-	return New(eng, cls, ctrl, kv, bg, aud, store, cfg)
+	processor := output.NewProcessor(ctrl, aud, store, provider)
+	return New(eng, cls, ctrl, kv, bg, aud, store, processor, cfg)
 }
 
 func devConfig() *config.Config {

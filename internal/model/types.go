@@ -271,3 +271,73 @@ type TenantConfig struct {
 	AuditKeyID    string            `json:"audit_key_id"`
 	CustomPolicies map[string]any   `json:"custom_policies,omitempty"`
 }
+
+// ---------- Phase 2 (Vault-OUT) types ----------
+
+// DataRecord is a record flowing through Phase 2 (read-time view generation).
+type DataRecord struct {
+	RecordID string                `json:"record_id"`
+	Category DataCategory          `json:"category"`
+	TenantID string                `json:"tenant_id"`
+	Fields   map[string]FieldValue `json:"fields"`
+}
+
+// FieldValue is a single field value with metadata about its current state and PII type.
+type FieldValue struct {
+	Value   any    `json:"value"`
+	Type    string `json:"type"`              // original|token|masked|encrypted|anonymized|filtered|generalized|hidden
+	PIIType string `json:"pii_type,omitempty"`
+}
+
+// UserContext carries the requester's identity, roles, and slice context for Phase 2.
+type UserContext struct {
+	UserID            string         `json:"user_id"`
+	TenantID          string         `json:"tenant_id"`
+	Department        string         `json:"department"`
+	Roles             []string       `json:"roles"`
+	AllowedCategories []DataCategory `json:"allowed_categories"`
+	AccessLevel       AccessLevel    `json:"access_level"`
+	Slice             SliceContext   `json:"slice,omitempty"`
+}
+
+// SliceContext defines a context-limited subset of fields (e.g. manufacturing→product slice).
+type SliceContext struct {
+	SliceType string            `json:"slice_type,omitempty"`
+	Filters   map[string]string `json:"filters,omitempty"`
+}
+
+// PermissionResponse is the result of Phase 2 processing.
+type PermissionResponse struct {
+	RequestID        string              `json:"request_id"`
+	Status           string              `json:"status"`
+	FilteredRecords  []DataRecord        `json:"filtered_records"`
+	Decisions        PermissionDecisions `json:"decisions"`
+	Audit            []FieldDisclosure   `json:"audit"`
+	ProcessingTimeMs int64               `json:"processing_time_ms"`
+}
+
+// PermissionDecisions summarises what happened to the record set during Phase 2.
+type PermissionDecisions struct {
+	TotalInput         int    `json:"total_input"`
+	Returned           int    `json:"returned"`
+	Anonymized         int    `json:"anonymized"`
+	FilteredOut        int    `json:"filtered_out"`
+	Aggregated         int    `json:"aggregated"`
+	AccessLevelApplied string `json:"access_level_applied"`
+	Strategy           string `json:"strategy"`
+}
+
+// FieldDisclosure records a single per-field disclosure decision for the audit trail.
+type FieldDisclosure struct {
+	FieldName     string `json:"field_name"`
+	OriginalState string `json:"original_state"`
+	FinalState    string `json:"final_state"`
+	Reason        string `json:"reason"`
+}
+
+// InferenceRisk is the output of the inference attack detector.
+type InferenceRisk struct {
+	Score   float64  `json:"score"`
+	Action  string   `json:"action"` // allow|warn|generalize|block
+	Factors []string `json:"factors"`
+}
