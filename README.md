@@ -12,31 +12,31 @@ bastion-vault is a privacy-preserving data anonymization service written in Go. 
 ┌──────────────────────────────────────────────────────────────────┐
 │                         Bastion Vault                            │
 │                                                                  │
-│  ┌─────────┐   ┌──────────────┐   ┌──────────────────────────┐  │
-│  │  CLI    │   │  REST :8080  │   │     gRPC :9090           │  │
-│  │ (cobra) │   │  (chi/http)  │   │     (proto stub)         │  │
-│  └────┬────┘   └──────┬───────┘   └────────────┬─────────────┘  │
-│       └───────────────┴────────────────────────┘                │
+│  ┌─────────┐   ┌──────────────┐   ┌──────────────────────────┐   │
+│  │  CLI    │   │  REST :8080  │   │     gRPC :9090           │   │
+│  │ (cobra) │   │  (chi/http)  │   │     (proto stub)         │   │
+│  └────┬────┘   └──────┬───────┘   └────────────┬─────────────┘   │
+│       └───────────────┴────────────────────────┘                 │
 │                        │                                         │
-│              ┌─────────┴──────────┐                             │
+│              ┌─────────┴──────────┐                              │
 │              │  Anonymizer Engine │  Phase 1: PII Detection      │
 │              │  (engine.go)       │  Phase 2: Strategy Apply     │
-│              └─────────┬──────────┘                             │
-│          ┌─────────────┼─────────────────┐                      │
-│          │             │                 │                       │
-│   ┌──────┴──────┐ ┌────┴──────┐ ┌───────┴────────┐             │
-│   │ Classifier  │ │ K-Anon    │ │ Access Control  │             │
-│   │ (PII detect)│ │ Validator │ │ (RBAC + OPA)    │             │
-│   └─────────────┘ └───────────┘ └───────┬─────────┘             │
+│              └─────────┬──────────┘                              │
+│          ┌─────────────┼────────────────┐                        │
+│          │             │                │                        │
+│   ┌──────┴──────┐ ┌────┴──────┐ ┌───────┴──────────┐             │
+│   │ Classifier  │ │ K-Anon    │ │ Access Control   │             │
+│   │ (PII detect)│ │ Validator │ │ (RBAC + OPA)     │             │
+│   └─────────────┘ └───────────┘ └───────┬──────────┘             │
 │                                         │                        │
-│   ┌──────────────────┐   ┌──────────────┴──────┐                │
-│   │  Break-Glass Mgr │   │  KMS Manager         │               │
-│   │  (dual approval) │   │  (Local/AWS/Vault)   │               │
-│   └──────────────────┘   └──────────────────────┘               │
+│   ┌──────────────────┐   ┌──────────────┴───────┐                │
+│   │  Break-Glass Mgr │   │  KMS Manager         │                │
+│   │  (dual approval) │   │  (Local/AWS/Vault)   │                │
+│   └──────────────────┘   └──────────────────────┘                │
 │                                                                  │
-│   ┌──────────────────────────────────────────────────────────┐  │
-│   │  Audit Logger  (append-only JSONL, per-tenant signing)   │  │
-│   └──────────────────────────────────────────────────────────┘  │
+│   ┌──────────────────────────────────────────────────────────┐   │
+│   │  Audit Logger  (append-only JSONL, per-tenant signing)   │   │
+│   └──────────────────────────────────────────────────────────┘   │
 └──────────────────────────────────────────────────────────────────┘
          │                    │                    │
     PostgreSQL 15         Redis 7              OPA 0.60
@@ -73,7 +73,7 @@ Master Key (KEK) — stored in KMS provider
 
 ## Data Categories & K-Anonymity Thresholds
 
-| Code  | Category           | K  | Quasi-Identifiers                               |
+| Code  | Category           | K  | Quasi-Identifiers                                |
 |-------|--------------------|----|--------------------------------------------------|
 | DC-01 | Customer Data      | 5  | age_group, gender, region, membership_grade      |
 | DC-02 | Manufacturing Data | 3  | product_category, factory_id, shift              |
@@ -83,32 +83,32 @@ Master Key (KEK) — stored in KMS provider
 
 ## PII Types & Anonymization Strategies
 
-| PII Type           | Strategy                     | Reversible |
-|--------------------|------------------------------|------------|
-| korean_name        | deterministic_tokenization   | via registry |
-| korean_rrn         | hmac_sha256                  | no         |
-| korean_mobile      | partial_masking `010-****-5678` + search token | no |
-| email              | deterministic_tokenization   | via registry |
-| address_detail     | suppression `[REMOVED]`      | no         |
-| address_city       | generalization (gu→si→province) | no      |
-| credit_card        | partial_masking `1234-****-****-3456` | no |
-| date_of_birth      | range_generalization (decade) | no        |
-| salary             | encryption (AES-256-GCM)     | yes        |
+| PII Type           | Strategy                                       | Reversible   |
+|--------------------|------------------------------------------------|--------------|
+| korean_name        | deterministic_tokenization                     | via registry |
+| korean_rrn         | hmac_sha256                                    | no           |
+| korean_mobile      | partial_masking `010-****-5678` + search token | no           |
+| email              | deterministic_tokenization                     | via registry |
+| address_detail     | suppression `[REMOVED]`                        | no           |
+| address_city       | generalization (gu→si→province)                | no           |
+| credit_card        | partial_masking `1234-****-****-3456`          | no           |
+| date_of_birth      | range_generalization (decade)                  | no           |
+| salary             | encryption (AES-256-GCM)                       | yes          |
 
 ---
 
 ## RBAC Access Matrix
 
-| Department / Role        | DC-01 Customer    | DC-02 Manufacturing | DC-03 HR/Finance   |
-|--------------------------|-------------------|---------------------|---------------------|
-| marketing / manager      | full + deanonymize | read               | aggregated          |
-| marketing / analyst      | k_anonymized (K=5) | k_anonymized       | aggregated          |
-| manufacturing / manager  | slice (K=5)       | full                | none                |
-| manufacturing / staff    | slice (K=5)       | full                | none                |
-| hr / manager             | none              | none                | full + deanonymize  |
-| hr / staff               | none              | none                | anonymized          |
-| executive / executive    | aggregated        | aggregated          | aggregated          |
-| audit / auditor          | audit_log         | audit_log           | audit_log           |
+| Department / Role        | DC-01 Customer     | DC-02 Manufacturing | DC-03 HR/Finance    |
+|--------------------------|--------------------|---------------------|---------------------|
+| marketing / manager      | full + deanonymize | read                | aggregated          |
+| marketing / analyst      | k_anonymized (K=5) | k_anonymized        | aggregated          |
+| manufacturing / manager  | slice (K=5)        | full                | none                |
+| manufacturing / staff    | slice (K=5)        | full                | none                |
+| hr / manager             | none               | none                | full + deanonymize  |
+| hr / staff               | none               | none                | anonymized          |
+| executive / executive    | aggregated         | aggregated          | aggregated          |
+| audit / auditor          | audit_log          | audit_log           | audit_log           |
 
 ---
 
