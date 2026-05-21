@@ -16,7 +16,6 @@ import (
 	"time"
 
 	_ "github.com/lib/pq"
-	_ "modernc.org/sqlite"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
 
@@ -24,6 +23,7 @@ import (
 	"github.com/zafrem/bastion-vault/internal/anonymizer"
 	"github.com/zafrem/bastion-vault/internal/audit"
 	"github.com/zafrem/bastion-vault/internal/breakglass"
+	"github.com/zafrem/bastion-vault/internal/cache"
 	"github.com/zafrem/bastion-vault/internal/classification"
 	"github.com/zafrem/bastion-vault/internal/config"
 	"github.com/zafrem/bastion-vault/internal/kanon"
@@ -106,30 +106,14 @@ func loadDeps(cfg *config.Config) (*kms.Manager, kms.Provider, *audit.Logger, er
 
 // newTokenStore builds the token persistence backend from configuration.
 func newTokenStore(cfg *config.Config) (tokendb.Store, error) {
-	switch cfg.TokenStore.Driver {
-	case "postgres":
+	if cfg.TokenStore.Driver == "postgres" {
 		db, err := sql.Open("postgres", cfg.TokenStore.DSN)
 		if err != nil {
 			return nil, fmt.Errorf("token store: %w", err)
 		}
 		return tokendb.NewPostgresStore(db), nil
-	case "sqlite":
-		dsn := cfg.TokenStore.DSN
-		if dsn == "" {
-			dsn = "file:bastion_vault_tokens.db?cache=shared&_journal=WAL"
-		}
-		db, err := sql.Open("sqlite", dsn)
-		if err != nil {
-			return nil, fmt.Errorf("opening sqlite: %w", err)
-		}
-		store, err := tokendb.NewSQLiteStore(db)
-		if err != nil {
-			return nil, fmt.Errorf("init sqlite store: %w", err)
-		}
-		return store, nil
-	default:
-		return tokendb.NewMemoryStore(), nil
 	}
+	return tokendb.NewMemoryStore(), nil
 }
 
 func newServerCmd() *cobra.Command {
@@ -157,6 +141,12 @@ func newServerCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+
+			// Start the GDPR erasure worker; it re-sweeps the token store daily for
+			// tenants that have pending erasure audit events.
+			stopErasure := tokendb.StartErasureWorker(cmd.Context(), store, aud, 24*time.Hour)
+			defer stopErasure()
+
 			eng := anonymizer.NewEngine(mgr, cls, aud, store)
 			ctrl := access.NewController(cfg.OPA.BundleServer)
 			kv := kanon.New()
@@ -166,7 +156,15 @@ func newServerCmd() *cobra.Command {
 			// view generation, token resolution, inference detection, and auditing.
 			processor := output.NewProcessor(ctrl, aud, store, provider)
 
-			httpSrv := server.New(eng, cls, ctrl, kv, bg, aud, store, processor, cfg)
+			// Redis client for JWT blacklisting and session caching.
+			// Gracefully degrades to no-op when Redis is not configured.
+			redisClient, rerr := cache.NewClient(cfg.Cache.Address, cfg.Cache.Password, cfg.Cache.DB)
+			if rerr != nil {
+				log.Printf("Redis unavailable, token blacklisting disabled: %v", rerr)
+				redisClient = nil
+			}
+
+			httpSrv := server.New(eng, cls, ctrl, kv, bg, aud, store, processor, cfg, redisClient)
 
 			httpAddr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.HTTPPort)
 			grpcAddr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.GRPCPort)

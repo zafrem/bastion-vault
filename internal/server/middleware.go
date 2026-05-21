@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"golang.org/x/time/rate"
+	"github.com/zafrem/bastion-vault/internal/cache"
 	"github.com/zafrem/bastion-vault/internal/config"
 	"github.com/zafrem/bastion-vault/internal/model"
 )
@@ -113,9 +115,31 @@ func isPublicPath(path string) bool {
 		path == "/v1/metrics"
 }
 
+// jtiBlacklistKey returns the Redis key used to blacklist a JWT by its jti claim.
+func jtiBlacklistKey(jti string) string {
+	return fmt.Sprintf("bl:jti:%s", jti)
+}
+
+// BlacklistJTI adds a JWT jti claim to the Redis blacklist with the given TTL.
+// This should be called when a token is revoked (break-glass revoke, GDPR erasure).
+// No-op if redisClient is nil.
+func BlacklistJTI(ctx context.Context, redisClient *cache.Client, jti string, ttl time.Duration) error {
+	if redisClient == nil || jti == "" {
+		return nil
+	}
+	return redisClient.Set(ctx, jtiBlacklistKey(jti), "1", ttl)
+}
+
 // authMiddleware validates a Bearer JWT and injects a *model.User into context.
 // When cfg.Auth.SkipAuth is true (dev mode) a default user is injected instead.
-func authMiddleware(cfg *config.Config) func(http.Handler) http.Handler {
+// If redisClient is non-nil, the middleware checks the JWT blacklist before
+// accepting a token (enables immediate revocation for break-glass and GDPR erasure).
+func authMiddleware(cfg *config.Config, redisClient ...*cache.Client) func(http.Handler) http.Handler {
+	var bl *cache.Client
+	if len(redisClient) > 0 {
+		bl = redisClient[0]
+	}
+
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Health-check and metrics endpoints are always public.
@@ -162,6 +186,22 @@ func authMiddleware(cfg *config.Config) func(http.Handler) http.Handler {
 			if !ok {
 				jsonError(w, "malformed token claims", http.StatusUnauthorized)
 				return
+			}
+
+			// Check Redis blacklist for the jti claim (if Redis is configured).
+			// This enables immediate revocation without waiting for the token to expire.
+			if bl != nil {
+				jti := claimString(claims, "jti")
+				if jti != "" {
+					val, berr := bl.Get(r.Context(), jtiBlacklistKey(jti))
+					if berr != nil {
+						log.Printf("auth: blacklist check failed for jti=%q: %v", jti, berr)
+						// Fail-open: do not block the request when Redis is temporarily unavailable.
+					} else if val != "" {
+						jsonError(w, "token has been revoked", http.StatusUnauthorized)
+						return
+					}
+				}
 			}
 
 			user := &model.User{

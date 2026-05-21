@@ -44,7 +44,7 @@ func testServer(t *testing.T, cfg *config.Config) *Server {
 	kv := kanon.New()
 	bg := breakglass.NewManager(aud)
 	processor := output.NewProcessor(ctrl, aud, store, provider)
-	return New(eng, cls, ctrl, kv, bg, aud, store, processor, cfg)
+	return New(eng, cls, ctrl, kv, bg, aud, store, processor, cfg, nil)
 }
 
 func devConfig() *config.Config {

@@ -15,6 +15,7 @@ import (
 	"github.com/zafrem/bastion-vault/internal/anonymizer"
 	"github.com/zafrem/bastion-vault/internal/audit"
 	"github.com/zafrem/bastion-vault/internal/breakglass"
+	"github.com/zafrem/bastion-vault/internal/cache"
 	"github.com/zafrem/bastion-vault/internal/classification"
 	"github.com/zafrem/bastion-vault/internal/config"
 	"github.com/zafrem/bastion-vault/internal/kanon"
@@ -25,20 +26,23 @@ import (
 
 // Server wraps all service dependencies and exposes the HTTP router.
 type Server struct {
-	engine     *anonymizer.Engine
-	classifier *classification.Classifier
-	controller *access.Controller
-	kanon      *kanon.Validator
-	bgManager  *breakglass.Manager
-	auditor    *audit.Logger
-	tokenStore tokendb.Store
-	processor  *output.Processor
-	cfg        *config.Config
-	startTime  time.Time
+	engine      *anonymizer.Engine
+	classifier  *classification.Classifier
+	controller  *access.Controller
+	kanon       *kanon.Validator
+	bgManager   *breakglass.Manager
+	auditor     *audit.Logger
+	tokenStore  tokendb.Store
+	processor   *output.Processor
+	cfg         *config.Config
+	redisClient *cache.Client
+	startTime   time.Time
 }
 
 // New constructs a Server from its service dependencies. processor may be nil
 // (only the Phase 2 endpoints are affected — they will return 503).
+// redisClient may be nil — token blacklisting is silently disabled when Redis
+// is not configured.
 func New(
 	eng *anonymizer.Engine,
 	cls *classification.Classifier,
@@ -49,18 +53,20 @@ func New(
 	store tokendb.Store,
 	processor *output.Processor,
 	cfg *config.Config,
+	redisClient *cache.Client,
 ) *Server {
 	return &Server{
-		engine:     eng,
-		classifier: cls,
-		controller: ctrl,
-		kanon:      kv,
-		bgManager:  bg,
-		auditor:    aud,
-		tokenStore: store,
-		processor:  processor,
-		cfg:        cfg,
-		startTime:  time.Now(),
+		engine:      eng,
+		classifier:  cls,
+		controller:  ctrl,
+		kanon:       kv,
+		bgManager:   bg,
+		auditor:     aud,
+		tokenStore:  store,
+		processor:   processor,
+		cfg:         cfg,
+		redisClient: redisClient,
+		startTime:   time.Now(),
 	}
 }
 
@@ -75,7 +81,7 @@ func (s *Server) Router() http.Handler {
 	if s.cfg.RateLimit.Enabled {
 		r.Use(rateLimitMiddleware(s.cfg.RateLimit.RPS, s.cfg.RateLimit.Burst))
 	}
-	r.Use(authMiddleware(s.cfg))
+	r.Use(authMiddleware(s.cfg, s.redisClient))
 	r.Use(tenantMiddleware)
 
 	r.Get("/v1/health/live", s.handleLive)
