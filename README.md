@@ -2,45 +2,61 @@
 
 **Module B of the Bastion RAG Security Governance Framework**
 
-bastion-vault is a privacy-preserving data anonymization service written in Go. It provides PII detection, multi-strategy anonymization, k-anonymity validation, RBAC-enforced access control, KMS-backed key management, and a break-glass emergency access workflow — all audit-trailed and compliance-ready for PIPA (Korea Personal Information Protection Act) and equivalent global frameworks.
+bastion-vault is a privacy-preserving data anonymization service written in Go. It implements a two-phase pipeline:
+
+- **Vault-IN (Phase 1):** PII detection and multi-strategy anonymization at write time — tokenization, HMAC-SHA256, partial masking, AES-256-GCM encryption, generalization, suppression.
+- **Vault-OUT (Phase 2):** Permission-based view generation at read time — selective token resolution, inference attack detection, k-anonymity enforcement, per-field disclosure auditing.
+
+All operations are RBAC-enforced, KMS-backed, and fully audit-trailed for PIPA (Korea Personal Information Protection Act) and equivalent global frameworks.
 
 ---
 
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                         Bastion Vault                            │
-│                                                                  │
-│  ┌─────────┐   ┌──────────────┐   ┌──────────────────────────┐   │
-│  │  CLI    │   │  REST :8080  │   │     gRPC :9090           │   │
-│  │ (cobra) │   │  (chi/http)  │   │     (proto stub)         │   │
-│  └────┬────┘   └──────┬───────┘   └────────────┬─────────────┘   │
-│       └───────────────┴────────────────────────┘                 │
-│                        │                                         │
-│              ┌─────────┴──────────┐                              │
-│              │  Anonymizer Engine │  Phase 1: PII Detection      │
-│              │  (engine.go)       │  Phase 2: Strategy Apply     │
-│              └─────────┬──────────┘                              │
-│          ┌─────────────┼────────────────┐                        │
-│          │             │                │                        │
-│   ┌──────┴──────┐ ┌────┴──────┐ ┌───────┴──────────┐             │
-│   │ Classifier  │ │ K-Anon    │ │ Access Control   │             │
-│   │ (PII detect)│ │ Validator │ │ (RBAC + OPA)     │             │
-│   └─────────────┘ └───────────┘ └───────┬──────────┘             │
-│                                         │                        │
-│   ┌──────────────────┐   ┌──────────────┴───────┐                │
-│   │  Break-Glass Mgr │   │  KMS Manager         │                │
-│   │  (dual approval) │   │  (Local/AWS/Vault)   │                │
-│   └──────────────────┘   └──────────────────────┘                │
-│                                                                  │
-│   ┌──────────────────────────────────────────────────────────┐   │
-│   │  Audit Logger  (append-only JSONL, per-tenant signing)   │   │
-│   └──────────────────────────────────────────────────────────┘   │
-└──────────────────────────────────────────────────────────────────┘
-         │                    │                    │
-    PostgreSQL 15         Redis 7              OPA 0.60
-    (RLS per tenant)   (session cache)      (Rego policies)
+┌────────────────────────────────────────────────────────────────────────┐
+│                            Bastion Vault                               │
+│                                                                        │
+│  ┌─────────┐   ┌──────────────┐   ┌────────────────────────────────┐  │
+│  │  CLI    │   │  REST :8080  │   │        gRPC :9090              │  │
+│  │ (cobra) │   │  (chi/http)  │   │        (JSON-over-gRPC)        │  │
+│  └────┬────┘   └──────┬───────┘   └──────────────┬─────────────────┘  │
+│       └───────────────┴──────────────────────────┘                    │
+│                        │                                               │
+│          ┌─────────────┴──────────────┐                               │
+│          │                            │                               │
+│  ┌───────▼──────────────┐   ┌─────────▼────────────────────────────┐  │
+│  │  VAULT-IN (Phase 1)  │   │       VAULT-OUT (Phase 2)            │  │
+│  │  Write-time pipeline │   │       Read-time pipeline             │  │
+│  │                      │   │                                      │  │
+│  │  Classifier (PII)    │   │  PermissionResolver  (RBAC+OPA+cache)│  │
+│  │  Anonymizer Engine   │   │  CrossTenantVerifier                 │  │
+│  │  · tokenization      │   │  InferenceDetector   (risk 0.0→1.0)  │  │
+│  │  · HMAC-SHA256       │   │  ViewGenerator       (per level)     │  │
+│  │  · partial masking   │   │  TokenResolver       (selective)     │  │
+│  │  · AES-256-GCM       │   │  K-Anon enforcer (DC-01=5,02=3,03=10)│  │
+│  │  · generalization    │   │  Aggregator          (stats-only)    │  │
+│  │  · suppression       │   │                                      │  │
+│  └──────────┬───────────┘   └──────────────┬───────────────────────┘  │
+│             └────────────────┬─────────────┘                          │
+│                              │                                         │
+│  ┌────────────┐  ┌───────────┴────────────┐  ┌───────────────────────┐ │
+│  │ K-Anon     │  │   Access Control       │  │  Break-Glass Mgr      │ │
+│  │ Validator  │  │   (RBAC + OPA)         │  │  (dual-approval, 4 h) │ │
+│  └────────────┘  └────────────────────────┘  └───────────────────────┘ │
+│                                                                        │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │  KMS Manager — Local (AES-256-GCM) / AWS KMS / HashiCorp Vault  │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                                                                        │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │  Audit Logger — append-only JSONL, HMAC-SHA256 per entry        │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+└────────────────────────────────────────────────────────────────────────┘
+         │                     │                    │
+    PostgreSQL 15          Redis 7              OPA 0.60
+    (token store,         (session cache)      (Rego policies)
+     RLS per tenant)
 ```
 
 ### KMS Key Hierarchy
@@ -57,17 +73,29 @@ Master Key (KEK) — stored in KMS provider
 
 ## Features
 
+**Vault-IN (write-time)**
 - **PII Detection** — regex + field-name heuristics for Korean RRN, name, mobile, email, address, credit card, date of birth, salary, and more (L1–L5 sensitivity classification)
 - **Multi-strategy anonymization** — deterministic tokenization, HMAC-SHA256, partial masking, generalization, range generalization, suppression, AES-256-GCM encryption
 - **K-anonymity validation** — quasi-identifier grouping with automatic generalization up the SRS-defined hierarchy
-- **RBAC access control** — 7-tier access level matrix (full → read → anonymized → k_anonymized → slice → aggregated → audit_log) enforced per department/role/category
-- **OPA integration** — Rego policy bundle for complex attribute-based decisions
-- **KMS abstraction** — pluggable backend (local file, AWS KMS, HashiCorp Vault) with DEK cache and provider failover
+- **Batch anonymization** — up to 1,000 records per request
+
+**Vault-OUT (read-time)**
+- **Permission-based views** — 7-tier access level matrix (full → read → anonymized → k_anonymized → slice → aggregated → audit_log) applied per field at read time
+- **Inference attack detection** — per-user query history (50 queries, 1 h window), risk scoring 0–1 with thresholds: 0.3 warn / 0.6 generalize / 0.8 block
+- **Selective token resolution** — deanonymization gated by RBAC deanonymize rights and tenant-ID verification
+- **Slice access** — manufacturing role gets field-level allow/block list (product_id, region/month only; no name/contact/payment)
+- **Aggregation** — statistics-only view (count, min/max/mean, top-5 distributions) for executive/aggregated access
+- **Cross-tenant verification** — records filtered by tenant; >10% cross-tenant records abort the batch
+- **Per-field disclosure audit** — every field-level access decision logged in `FieldDisclosure` trail
+
+**Platform**
+- **RBAC + OPA** — built-in matrix with optional Rego policy delegation; fail-open fallback
+- **KMS abstraction** — local (AES-256-GCM), AWS KMS, HashiCorp Vault transit; 5-min DEK cache
 - **Break-glass workflow** — dual-approval emergency access (max 4 h, 15-min approval window, auto-revoke)
 - **Multi-tenancy** — per-tenant key isolation, config registry, context propagation
-- **Audit trail** — append-only JSONL audit log for every sensitive operation
-- **Prometheus metrics** — request counts, latency histograms exposed at `/v1/metrics`
-- **CLI** — `server`, `anonymize`, `detect-pii`, `classify`, `k-anon-check`, `access`, `interactive`
+- **Audit trail** — append-only JSONL, HMAC-SHA256 per entry, 365-day retention worker
+- **Prometheus metrics** — anonymize/deanonymize ops, field counts, break-glass sessions at `/v1/metrics`
+- **CLI** — `server`, `anonymize`, `detect-pii`, `classify`, `k-anon-check`, `access`, `interactive`, `apply-permissions`, `resolve-tokens`, `verify-access`
 
 ---
 
@@ -147,13 +175,16 @@ VAULT_MASTER_KEY=$(openssl rand -hex 32) docker compose -f deployments/docker-co
 vault [command] [flags]
 
 Commands:
-  server          Start the REST API server
-  anonymize       Anonymize records from a JSONL file
-  detect-pii      Detect PII fields in a JSONL file
-  classify        Classify a JSONL dataset into a data category
-  k-anon-check    Validate k-anonymity of a JSONL dataset
-  access          Check access level for a role against a data category
-  interactive     Start an interactive REPL session
+  server              Start the REST API server
+  anonymize           Anonymize records from a JSONL file        [Vault-IN]
+  detect-pii          Detect PII fields in a JSONL file          [Vault-IN]
+  classify            Classify a JSONL dataset into a data category
+  k-anon-check        Validate k-anonymity of a JSONL dataset
+  access              Check access level for a role against a data category
+  interactive         Start an interactive REPL session
+  apply-permissions   Apply permission-based view to records     [Vault-OUT]
+  resolve-tokens      Selectively resolve tokens (deanonymize)   [Vault-OUT]
+  verify-access       Check effective access level for a category[Vault-OUT]
 ```
 
 ### detect-pii
@@ -341,6 +372,97 @@ Content-Type: application/json
 
 Two approvals are required within 15 minutes. After the second approval, the response includes a `token` for use in subsequent anonymize/deanonymize calls via `break_glass_token`.
 
+### Vault-OUT — Apply Permissions
+
+Applies a permission-based view to a set of records based on the caller's RBAC level.
+
+```http
+POST /v1/vault/apply-permissions
+Content-Type: application/json
+
+{
+  "user": {
+    "user_id": "u-001",
+    "tenant_id": "tenant-a",
+    "department": "marketing",
+    "roles": ["analyst"],
+    "access_level": "k_anonymized"
+  },
+  "category": "DC-01",
+  "records": [
+    {
+      "record_id": "r-1",
+      "category": "DC-01",
+      "tenant_id": "tenant-a",
+      "fields": {
+        "name":   {"value": "TOK:abc123", "type": "token"},
+        "region": {"value": "서울시 강남구", "type": "original"}
+      }
+    }
+  ]
+}
+```
+
+Response: `PermissionResponse` with `filtered_records`, `decisions`, `audit` (per-field disclosures), and `processing_time_ms`.
+
+### Vault-OUT — Resolve Tokens
+
+Selectively deanonymizes tokens for roles with explicit deanonymize rights.
+
+```http
+POST /v1/vault/resolve-tokens
+Content-Type: application/json
+
+{"user": {...}, "records": [...]}
+```
+
+### Vault-OUT — Verify Access
+
+Returns the effective access level for the authenticated user against a category.
+
+```http
+POST /v1/vault/verify-access
+Content-Type: application/json
+
+{"category": "DC-01"}
+```
+
+Response: `{"allowed": true, "access_level": "k_anonymized", "reason": "allowed by RBAC policy"}`
+
+### Vault-OUT — Detect Inference
+
+Scores inference attack risk for a query pattern.
+
+```http
+POST /v1/vault/detect-inference
+Content-Type: application/json
+
+{
+  "category": "DC-01",
+  "filters": {"region": "강남구", "gender": "F", "age_group": "30s"},
+  "expected_result_count": 3
+}
+```
+
+Response: `{"score": 0.75, "action": "generalize", "factors": ["high_specificity", "small_result_set"]}`
+
+### Vault-OUT — Full Process Pipeline
+
+Runs the complete Vault-OUT pipeline: cross-tenant verify → permission resolve → inference detect → view generate → k-anon enforce → audit.
+
+```http
+POST /v1/vault/process
+Content-Type: application/json
+
+{
+  "request_id": "req-001",
+  "user": {...},
+  "category": "DC-01",
+  "records": [...],
+  "query": {"filters": {}, "expected_result_count": 10}
+}
+```
+
 ### Health
 
 ```http
@@ -402,32 +524,47 @@ make gen-master-key
 bastion-vault/
 ├── cmd/vault/main.go               # CLI entrypoint (cobra)
 ├── internal/
-│   ├── model/types.go              # Shared types (DataCategory, PIIType, etc.)
+│   ├── model/types.go              # Shared types (DataCategory, PIIType, DataRecord, etc.)
 │   ├── config/config.go            # YAML + env config loading
 │   ├── kms/
 │   │   ├── interface.go            # KMSProvider interface
 │   │   ├── local.go                # Local AES-256-GCM file-based provider
-│   │   └── manager.go             # Failover + DEK cache manager
+│   │   ├── aws.go                  # AWS KMS provider
+│   │   ├── hashicorp.go            # HashiCorp Vault transit provider
+│   │   └── manager.go              # Failover + DEK cache manager
 │   ├── classification/classifier.go # PII detection + category inference
 │   ├── anonymizer/
-│   │   ├── engine.go              # Phase 1 + Phase 2 anonymization pipeline
-│   │   └── strategies/            # One file per anonymization strategy
-│   ├── access/controller.go       # RBAC matrix + OPA delegation
-│   ├── kanon/validator.go         # K-anonymity validation + auto-generalization
-│   ├── breakglass/manager.go      # Dual-approval break-glass workflow
-│   ├── tenant/isolation.go        # Per-tenant config registry + context helpers
-│   ├── audit/event.go             # Append-only JSONL audit logger
+│   │   ├── engine.go               # Vault-IN anonymization pipeline
+│   │   └── strategies/             # One file per anonymization strategy
+│   ├── output/                     # Vault-OUT read-time pipeline
+│   │   ├── processor.go            # Orchestrates the full Phase 2 pipeline
+│   │   ├── permission_resolver.go  # RBAC/OPA resolution with 5-min TTL cache
+│   │   ├── view_generator.go       # Per-access-level field transforms
+│   │   ├── token_resolver.go       # Selective token deanonymization
+│   │   ├── inference_detector.go   # Query history + risk scoring
+│   │   ├── aggregator.go           # Statistics-only view for aggregated access
+│   │   └── cross_tenant.go         # Cross-tenant record filtering + alerting
+│   ├── access/controller.go        # RBAC matrix + OPA delegation
+│   ├── kanon/validator.go          # K-anonymity validation + auto-generalization
+│   ├── breakglass/manager.go       # Dual-approval break-glass workflow
+│   ├── tenant/isolation.go         # Per-tenant config registry + context helpers
+│   ├── tokendb/                    # Token store (memory + postgres)
+│   ├── audit/
+│   │   ├── event.go                # Append-only JSONL logger, HMAC-SHA256 signing
+│   │   └── retention.go            # 24 h retention worker
 │   └── server/
-│       ├── rest.go                # chi router + all HTTP handlers
-│       └── middleware.go          # Auth, logging, metrics, tenant middleware
-├── policies/vault.rego            # OPA Rego policy bundle
-├── configs/vault.yaml             # Reference configuration
-├── api/proto/vault.proto          # gRPC service definition
+│       ├── rest.go                 # chi router + all HTTP handlers
+│       ├── grpc.go                 # JSON-over-gRPC server
+│       ├── middleware.go           # Auth, logging, metrics, rate limiting
+│       └── metrics.go              # Prometheus business metrics
+├── policies/vault.rego             # OPA Rego policy bundle
+├── configs/vault.yaml              # Reference configuration
+├── api/proto/vault.proto           # gRPC service definition
 ├── deployments/
-│   ├── Dockerfile                 # Multi-stage scratch image
-│   ├── docker-compose.yml         # Full dev stack (Postgres, Redis, OPA, Prometheus)
-│   └── k8s/deployment.yaml        # Kubernetes Deployment + HPA
-└── tests/fixtures/                # Sample JSONL datasets
+│   ├── Dockerfile                  # Multi-stage scratch image
+│   ├── docker-compose.yml          # Full dev stack (Postgres, Redis, OPA, Prometheus)
+│   └── k8s/deployment.yaml         # Kubernetes Deployment + HPA
+└── tests/fixtures/                 # Sample JSONL datasets
 ```
 
 ### Adding a New Strategy
