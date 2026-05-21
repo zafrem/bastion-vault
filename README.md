@@ -17,28 +17,28 @@ All operations are RBAC-enforced, KMS-backed, and fully audit-trailed for PIPA (
 ┌────────────────────────────────────────────────────────────────────────┐
 │                            Bastion Vault                               │
 │                                                                        │
-│  ┌─────────┐   ┌──────────────┐   ┌────────────────────────────────┐  │
-│  │  CLI    │   │  REST :8080  │   │        gRPC :9090              │  │
-│  │ (cobra) │   │  (chi/http)  │   │        (JSON-over-gRPC)        │  │
-│  └────┬────┘   └──────┬───────┘   └──────────────┬─────────────────┘  │
-│       └───────────────┴──────────────────────────┘                    │
+│  ┌─────────┐   ┌──────────────┐   ┌────────────────────────────────┐   │
+│  │  CLI    │   │  REST :8080  │   │        gRPC :9090              │   │
+│  │ (cobra) │   │  (chi/http)  │   │        (JSON-over-gRPC)        │   │
+│  └────┬────┘   └──────┬───────┘   └──────────────┬─────────────────┘   │
+│       └───────────────┴──────────────────────────┘                     │
 │                        │                                               │
-│          ┌─────────────┴──────────────┐                               │
-│          │                            │                               │
-│  ┌───────▼──────────────┐   ┌─────────▼────────────────────────────┐  │
-│  │  VAULT-IN (Phase 1)  │   │       VAULT-OUT (Phase 2)            │  │
-│  │  Write-time pipeline │   │       Read-time pipeline             │  │
-│  │                      │   │                                      │  │
-│  │  Classifier (PII)    │   │  PermissionResolver  (RBAC+OPA+cache)│  │
-│  │  Anonymizer Engine   │   │  CrossTenantVerifier                 │  │
-│  │  · tokenization      │   │  InferenceDetector   (risk 0.0→1.0)  │  │
-│  │  · HMAC-SHA256       │   │  ViewGenerator       (per level)     │  │
-│  │  · partial masking   │   │  TokenResolver       (selective)     │  │
-│  │  · AES-256-GCM       │   │  K-Anon enforcer (DC-01=5,02=3,03=10)│  │
-│  │  · generalization    │   │  Aggregator          (stats-only)    │  │
-│  │  · suppression       │   │                                      │  │
-│  └──────────┬───────────┘   └──────────────┬───────────────────────┘  │
-│             └────────────────┬─────────────┘                          │
+│          ┌─────────────┴──────────────┐                                │
+│          │                            │                                │
+│  ┌───────▼──────────────┐   ┌─────────▼────────────────────────────┐   │
+│  │  VAULT-IN (Phase 1)  │   │       VAULT-OUT (Phase 2)            │   │
+│  │  Write-time pipeline │   │       Read-time pipeline             │   │
+│  │                      │   │                                      │   │
+│  │  Classifier (PII)    │   │  PermissionResolver  (RBAC+OPA+cache)│   │
+│  │  Anonymizer Engine   │   │  CrossTenantVerifier                 │   │
+│  │  · tokenization      │   │  InferenceDetector   (risk 0.0→1.0)  │   │
+│  │  · HMAC-SHA256       │   │  ViewGenerator       (per level)     │   │
+│  │  · partial masking   │   │  TokenResolver       (selective)     │   │
+│  │  · AES-256-GCM       │   │  K-Anon enforcer (DC-01=5,02=3,03=10)│   │
+│  │  · generalization    │   │  Aggregator          (stats-only)    │   │
+│  │  · suppression       │   │                                      │   │
+│  └──────────┬───────────┘   └──────────────┬───────────────────────┘   │
+│             └────────────────┬─────────────┘                           │
 │                              │                                         │
 │  ┌────────────┐  ┌───────────┴────────────┐  ┌───────────────────────┐ │
 │  │ K-Anon     │  │   Access Control       │  │  Break-Glass Mgr      │ │
