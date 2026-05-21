@@ -680,7 +680,7 @@ The deployment includes:
 
 ---
 ## Other Module
-  * [Vault](https://github.com/zafrem/bastion-vault)
+  * [Sentinel](https://github.com/zafrem/bastion-sentinel)
   * [Navigator](https://github.com/zafrem/bastion-navigator)
   * [Anchor](https://github.com/zafrem/bastion-anchor)
   * [Tracker](https://github.com/zafrem/bastion-tracker)
