@@ -679,6 +679,13 @@ The deployment includes:
 | K-anonymity validation | < 50 ms   |
 
 ---
+## Other Module
+  * [Vault](https://github.com/zafrem/bastion-vault)
+  * [Navigator](https://github.com/zafrem/bastion-navigator)
+  * [Anchor](https://github.com/zafrem/bastion-anchor)
+  * [Tracker](https://github.com/zafrem/bastion-tracker)
+
+---
 
 ## License
 
