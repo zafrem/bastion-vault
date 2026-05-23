@@ -88,6 +88,7 @@ func (s *Server) Router() http.Handler {
 	r.Get("/v1/health/ready", s.handleReady)
 	r.Handle("/v1/metrics", promhttp.Handler())
 
+	r.Get("/v1/vault/permissions/{userID}", s.handleGetPermissions)
 	r.Post("/v1/vault/anonymize", s.handleAnonymize)
 	r.Post("/v1/vault/anonymize/batch", s.handleAnonymizeBatch)
 	r.Post("/v1/vault/deanonymize", s.handleDeanonymize)
@@ -144,6 +145,24 @@ func categoryK(cat model.DataCategory) int {
 	default:
 		return 5
 	}
+}
+
+func (s *Server) handleGetPermissions(w http.ResponseWriter, r *http.Request) {
+	// For testing purposes, we assume the user exists in our RBAC matrix.
+	// In a real system, we'd lookup the user's department/role first.
+	// Here we'll default to a "marketing:manager" for demonstration.
+	userID := chi.URLParam(r, "userID")
+	user := &model.User{
+		UserID:     userID,
+		Department: "marketing",
+		Role:       "manager",
+	}
+
+	allowed := s.controller.AllowedCategories(user)
+	jsonOK(w, map[string]any{
+		"user_id":            userID,
+		"allowed_categories": allowed,
+	})
 }
 
 // handleLive is the Kubernetes liveness probe; always returns 200 when the process is alive.

@@ -113,6 +113,23 @@ func (c *Controller) Decide(ctx context.Context, user *model.User, category mode
 	}, nil
 }
 
+// AllowedCategories returns all categories the user has any access to.
+func (c *Controller) AllowedCategories(user *model.User) []string {
+	key := fmt.Sprintf("%s:%s", user.Department, user.Role)
+	catMap, ok := rbacMatrix[key]
+	if !ok {
+		return nil
+	}
+
+	var allowed []string
+	for cat, level := range catMap {
+		if level != model.AccessNone {
+			allowed = append(allowed, string(cat))
+		}
+	}
+	return allowed
+}
+
 // CanDeanonymize reports whether the user may deanonymize records in the given category.
 func (c *Controller) CanDeanonymize(user *model.User, category model.DataCategory) bool {
 	key := fmt.Sprintf("%s:%s", user.Department, user.Role)

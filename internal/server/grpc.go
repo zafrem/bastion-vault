@@ -331,9 +331,11 @@ func healthHandler(srv any, ctx context.Context, dec func(any) error, intercepto
 	return srv.(*GRPCServer).health(ctx, dec, interceptor)
 }
 
+type VaultServiceServer interface{}
+
 var vaultServiceDesc = grpc.ServiceDesc{
 	ServiceName: "bastion.vault.v1.VaultService",
-	HandlerType: (*GRPCServer)(nil),
+	HandlerType: (*VaultServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{MethodName: "Anonymize", Handler: anonymizeHandler},
 		{MethodName: "Deanonymize", Handler: deanonymizeHandler},
