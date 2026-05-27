@@ -341,3 +341,32 @@ type InferenceRisk struct {
 	Action  string   `json:"action"` // allow|warn|generalize|block
 	Factors []string `json:"factors"`
 }
+
+// ─── Honey-Token types ────────────────────────────────────────────────────────
+
+// HoneyToken is a decoy data record owned by Vault to detect intrusion.
+// Vault is the authoritative owner of the honey-token lifecycle (SRS doc 20).
+type HoneyToken struct {
+	TokenID       string            `json:"token_id"`
+	Name          string            `json:"name"`
+	Type          string            `json:"type"`          // fake_identity, fake_credential, fake_financial, fake_email, fake_document
+	Category      string            `json:"category"`      // data category where injected
+	Data          map[string]string `json:"data"`          // the fake data values
+	CreatedAt     time.Time         `json:"created_at"`
+	Injected      bool              `json:"injected"`
+	InjectedAt    *time.Time        `json:"injected_at,omitempty"`
+	Enabled       bool              `json:"enabled"`
+	TriggerCount  int               `json:"trigger_count"`
+	LastTriggered *time.Time        `json:"last_triggered,omitempty"`
+	TenantID      string            `json:"tenant_id"`
+	Metadata      map[string]string `json:"metadata,omitempty"`
+}
+
+// HoneyTokenCreateRequest is the body for POST /v1/vault/honey-tokens.
+type HoneyTokenCreateRequest struct {
+	Name     string            `json:"name"`
+	Type     string            `json:"type"`
+	Category string            `json:"category"`
+	Data     map[string]string `json:"data"`
+	Metadata map[string]string `json:"metadata,omitempty"`
+}
