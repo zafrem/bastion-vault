@@ -10,17 +10,43 @@ import (
 
 // Config is the root configuration structure populated from vault.yaml + env overrides
 type Config struct {
-	Server   ServerConfig   `mapstructure:"server"`
-	KMS      KMSConfig      `mapstructure:"kms"`
-	Database DatabaseConfig `mapstructure:"database"`
-	Cache    CacheConfig    `mapstructure:"cache"`
-	OPA      OPAConfig      `mapstructure:"opa"`
-	Audit    AuditConfig    `mapstructure:"audit"`
-	Tenant   TenantSettings `mapstructure:"tenant"`
-	Log      LogConfig      `mapstructure:"log"`
-	Auth     AuthConfig     `mapstructure:"auth"`
+	Server     ServerConfig     `mapstructure:"server"`
+	KMS        KMSConfig        `mapstructure:"kms"`
+	Database   DatabaseConfig   `mapstructure:"database"`
+	Cache      CacheConfig      `mapstructure:"cache"`
+	OPA        OPAConfig        `mapstructure:"opa"`
+	Audit      AuditConfig      `mapstructure:"audit"`
+	Tenant     TenantSettings   `mapstructure:"tenant"`
+	Log        LogConfig        `mapstructure:"log"`
+	Auth       AuthConfig       `mapstructure:"auth"`
 	TokenStore TokenStoreConfig `mapstructure:"token_store"`
 	RateLimit  RateLimitConfig  `mapstructure:"rate_limit"`
+	Events     EventsConfig     `mapstructure:"events"`
+	CloudLLM   CloudLLMConfig   `mapstructure:"cloud_llm"`
+}
+
+// CloudLLMConfig configures the Cloud LLM Connector extension (doc 21).
+type CloudLLMConfig struct {
+	Enabled         bool                    `mapstructure:"enabled"`
+	Providers       []CloudLLMProviderConfig `mapstructure:"providers"`
+	DefaultProvider string                   `mapstructure:"default_provider"`
+}
+
+// CloudLLMProviderConfig describes a single cloud LLM provider.
+type CloudLLMProviderConfig struct {
+	ID         string `mapstructure:"id"`
+	Type       string `mapstructure:"type"`        // "openai" | "claude" | "gemini" | "custom"
+	Model      string `mapstructure:"model"`
+	APIKeyKMS  string `mapstructure:"api_key_kms"` // KMS reference: "env://VAR" | "plain://key"
+	Endpoint   string `mapstructure:"endpoint"`    // custom providers only
+	TimeoutS   int    `mapstructure:"timeout_seconds"`
+	MaxRetries int    `mapstructure:"max_retries"`
+}
+
+// EventsConfig enables Foundation-standard event publishing to NATS (doc 02).
+type EventsConfig struct {
+	NATSUrl string `mapstructure:"nats_url"`
+	Enabled bool   `mapstructure:"enabled"`
 }
 
 // TokenStoreConfig selects the persistence backend for token mappings.

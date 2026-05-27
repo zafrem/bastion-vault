@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/zafrem/bastion-vault/internal/access"
@@ -17,7 +19,10 @@ import (
 	"github.com/zafrem/bastion-vault/internal/breakglass"
 	"github.com/zafrem/bastion-vault/internal/cache"
 	"github.com/zafrem/bastion-vault/internal/classification"
+	"github.com/zafrem/bastion-vault/internal/cloudllm"
 	"github.com/zafrem/bastion-vault/internal/config"
+	"github.com/zafrem/bastion-vault/internal/events"
+	"github.com/zafrem/bastion-vault/internal/hooks"
 	"github.com/zafrem/bastion-vault/internal/kanon"
 	"github.com/zafrem/bastion-vault/internal/model"
 	"github.com/zafrem/bastion-vault/internal/output"
@@ -37,6 +42,13 @@ type Server struct {
 	cfg         *config.Config
 	redisClient *cache.Client
 	startTime   time.Time
+	pub         *events.Publisher
+	hm          *hooks.Manager
+	llmConn     *cloudllm.Connector // nil when cloud_llm.enabled=false
+
+	// Honey-token registry — in-memory, owned by Vault (SRS doc 20).
+	honeyTokenMu sync.RWMutex
+	honeyTokens  map[string]*model.HoneyToken // tokenID → token
 }
 
 // New constructs a Server from its service dependencies. processor may be nil
@@ -55,7 +67,8 @@ func New(
 	cfg *config.Config,
 	redisClient *cache.Client,
 ) *Server {
-	return &Server{
+	pub := events.New(cfg.Events.NATSUrl)
+	s := &Server{
 		engine:      eng,
 		classifier:  cls,
 		controller:  ctrl,
@@ -67,8 +80,18 @@ func New(
 		cfg:         cfg,
 		redisClient: redisClient,
 		startTime:   time.Now(),
+		pub:         pub,
+		hm:          hooks.New(),
+		honeyTokens: make(map[string]*model.HoneyToken),
 	}
+	if cfg.CloudLLM.Enabled {
+		s.llmConn = buildCloudLLMConnector(cfg, eng, pub)
+	}
+	return s
 }
+
+// Hooks returns the hook manager so external coordinators can register listeners.
+func (s *Server) Hooks() *hooks.Manager { return s.hm }
 
 // Router returns the configured chi router.
 func (s *Server) Router() http.Handler {
@@ -102,18 +125,29 @@ func (s *Server) Router() http.Handler {
 
 	// Phase 2 (Vault-OUT) endpoints
 	r.Post("/v1/vault/apply-permissions", s.handleApplyPermissions)
+	r.Post("/v1/vault/transform", s.handleApplyPermissions)     // SRS alias: POST /v1/vault/transform
 	r.Post("/v1/vault/resolve-tokens", s.handleResolveTokens)
 	r.Post("/v1/vault/verify-access", s.handleVerifyAccess)
+	r.Post("/v1/vault/access/check", s.handleVerifyAccess)     // SRS alias: POST /v1/vault/access/check
 	r.Post("/v1/vault/validate-output-set", s.handleValidateOutputSet)
 	r.Post("/v1/vault/detect-inference", s.handleDetectInference)
 	r.Post("/v1/vault/process", s.handleProcess)
 
 	r.Delete("/v1/vault/tokens", s.handleErasure)
 
+	// Honey-token lifecycle — Vault owns creation/injection/registry (SRS doc 20).
+	r.Get("/v1/vault/honey-tokens", s.handleListHoneyTokens)
+	r.Post("/v1/vault/honey-tokens", s.handleCreateHoneyToken)
+	r.Post("/v1/vault/honey-tokens/{id}/inject", s.handleInjectHoneyToken)
+	r.Delete("/v1/vault/honey-tokens/{id}", s.handleDeleteHoneyToken)
+
 	r.Get("/v1/config", s.handleGetConfig)
 	r.Post("/v1/config/reload", s.handleConfigReload)
 
 	r.Get("/v1/vault/audit", s.handleAuditLog)
+
+	// Cloud LLM Connector (doc 21) — only wired when enabled.
+	r.Post("/v1/vault/llm/complete", s.handleLLMComplete)
 
 	return r
 }
@@ -147,24 +181,6 @@ func categoryK(cat model.DataCategory) int {
 	}
 }
 
-func (s *Server) handleGetPermissions(w http.ResponseWriter, r *http.Request) {
-	// For testing purposes, we assume the user exists in our RBAC matrix.
-	// In a real system, we'd lookup the user's department/role first.
-	// Here we'll default to a "marketing:manager" for demonstration.
-	userID := chi.URLParam(r, "userID")
-	user := &model.User{
-		UserID:     userID,
-		Department: "marketing",
-		Role:       "manager",
-	}
-
-	allowed := s.controller.AllowedCategories(user)
-	jsonOK(w, map[string]any{
-		"user_id":            userID,
-		"allowed_categories": allowed,
-	})
-}
-
 // handleLive is the Kubernetes liveness probe; always returns 200 when the process is alive.
 func (s *Server) handleLive(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]string{"status": "alive"})
@@ -190,7 +206,25 @@ func (s *Server) handleAnonymize(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, fmt.Sprintf("invalid request body: %v", err), http.StatusBadRequest)
 		return
 	}
-	req.TenantID = tenantFromCtx(r.Context())
+	authTenantID := tenantFromCtx(r.Context())
+	if req.TenantID != "" && req.TenantID != authTenantID {
+		tc := events.ExtractTraceContext(r.Header.Get("X-Trace-ID"), r.Header.Get("X-Span-ID"), r.Header.Get("X-Parent-Span-ID"), authTenantID, user.UserID, r.Header.Get("X-Request-ID"))
+		s.pub.Publish(events.EventCrossTenantAttempt(tc, req.TenantID, "anonymize"))
+		s.hm.Fire(hooks.Event{
+			Type:     hooks.EventCrossTenantAttempt,
+			TenantID: authTenantID,
+			TraceID:  tc.TraceID,
+			SpanID:   tc.SpanID,
+			Data: map[string]interface{}{
+				"requested_tenant_id": req.TenantID,
+				"operation":           "anonymize",
+			},
+			Ctx: r.Context(),
+		})
+		jsonError(w, "cross-tenant access denied", http.StatusForbidden)
+		return
+	}
+	req.TenantID = authTenantID
 
 	decision, err := s.controller.Decide(r.Context(), user, req.Category)
 	if err != nil {
@@ -198,6 +232,8 @@ func (s *Server) handleAnonymize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !decision.Allowed {
+		tc := events.ExtractTraceContext(r.Header.Get("X-Trace-ID"), r.Header.Get("X-Span-ID"), r.Header.Get("X-Parent-Span-ID"), req.TenantID, user.UserID, r.Header.Get("X-Request-ID"))
+		s.pub.Publish(events.EventAccessDenied(tc, string(req.Category), decision.Reason))
 		jsonError(w, decision.Reason, http.StatusForbidden)
 		return
 	}
@@ -222,11 +258,39 @@ func (s *Server) handleAnonymize(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// If access level requires k-anonymity, generalize until the dataset satisfies K.
+	kAnonymityApplied := false
 	if decision.AccessLevel == model.AccessKAnonymized {
 		_, generalizedRecords, gerr := s.kanon.ValidateAndGeneralize(r.Context(), resp.Records, req.Category, categoryK(req.Category))
 		if gerr == nil {
 			resp.Records = generalizedRecords
+			kAnonymityApplied = true
 		}
+	}
+
+	tc := events.ExtractTraceContext(r.Header.Get("X-Trace-ID"), r.Header.Get("X-Span-ID"), r.Header.Get("X-Parent-Span-ID"), req.TenantID, user.UserID, r.Header.Get("X-Request-ID"))
+	strategies := make([]string, 0, len(resp.Metadata.StrategiesApplied))
+	for k := range resp.Metadata.StrategiesApplied {
+		strategies = append(strategies, k)
+	}
+	s.pub.Publish(events.EventAnonymized(tc, string(req.Category), len(resp.Records), strategies))
+	s.hm.Fire(hooks.Event{
+		Type:     hooks.EventAnonymized,
+		TenantID: req.TenantID,
+		TraceID:  tc.TraceID,
+		SpanID:   tc.SpanID,
+		Data:     map[string]interface{}{"category": string(req.Category), "record_count": len(resp.Records)},
+		Ctx:      r.Context(),
+	})
+	if kAnonymityApplied {
+		s.pub.Publish(events.EventKAnonymityEnforced(tc, string(req.Category), categoryK(req.Category), len(resp.Records)))
+		s.hm.Fire(hooks.Event{
+			Type:     hooks.EventKAnonymityEnforced,
+			TenantID: req.TenantID,
+			TraceID:  tc.TraceID,
+			SpanID:   tc.SpanID,
+			Data:     map[string]interface{}{"category": string(req.Category), "k": categoryK(req.Category)},
+			Ctx:      r.Context(),
+		})
 	}
 
 	jsonOK(w, resp)
@@ -284,11 +348,23 @@ func (s *Server) handleAnonymizeBatch(w http.ResponseWriter, r *http.Request) {
 		fieldsAnonymizedTotal.With(prometheus.Labels{"strategy": strat}).Add(float64(n))
 	}
 
+	batchKAnonymityApplied := false
 	if decision.AccessLevel == model.AccessKAnonymized {
 		_, generalizedRecords, gerr := s.kanon.ValidateAndGeneralize(r.Context(), resp.Records, req.Category, categoryK(req.Category))
 		if gerr == nil {
 			resp.Records = generalizedRecords
+			batchKAnonymityApplied = true
 		}
+	}
+
+	batchStrategies := make([]string, 0, len(resp.Metadata.StrategiesApplied))
+	for k := range resp.Metadata.StrategiesApplied {
+		batchStrategies = append(batchStrategies, k)
+	}
+	batchTC := events.ExtractTraceContext(r.Header.Get("X-Trace-ID"), r.Header.Get("X-Span-ID"), r.Header.Get("X-Parent-Span-ID"), req.TenantID, user.UserID, r.Header.Get("X-Request-ID"))
+	s.pub.Publish(events.EventAnonymized(batchTC, string(req.Category), len(resp.Records), batchStrategies))
+	if batchKAnonymityApplied {
+		s.pub.Publish(events.EventKAnonymityEnforced(batchTC, string(req.Category), categoryK(req.Category), len(resp.Records)))
 	}
 
 	jsonOK(w, resp)
@@ -306,7 +382,25 @@ func (s *Server) handleDeanonymize(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, fmt.Sprintf("invalid request body: %v", err), http.StatusBadRequest)
 		return
 	}
-	req.TenantID = tenantFromCtx(r.Context())
+	authTenantID := tenantFromCtx(r.Context())
+	if req.TenantID != "" && req.TenantID != authTenantID {
+		tc := events.ExtractTraceContext(r.Header.Get("X-Trace-ID"), r.Header.Get("X-Span-ID"), r.Header.Get("X-Parent-Span-ID"), authTenantID, user.UserID, r.Header.Get("X-Request-ID"))
+		s.pub.Publish(events.EventCrossTenantAttempt(tc, req.TenantID, "deanonymize"))
+		s.hm.Fire(hooks.Event{
+			Type:     hooks.EventCrossTenantAttempt,
+			TenantID: authTenantID,
+			TraceID:  tc.TraceID,
+			SpanID:   tc.SpanID,
+			Data: map[string]interface{}{
+				"requested_tenant_id": req.TenantID,
+				"operation":           "deanonymize",
+			},
+			Ctx: r.Context(),
+		})
+		jsonError(w, "cross-tenant access denied", http.StatusForbidden)
+		return
+	}
+	req.TenantID = authTenantID
 
 	if !s.controller.CanDeanonymize(user, req.Category) {
 		jsonError(w, "deanonymize not permitted for your role", http.StatusForbidden)
@@ -336,6 +430,38 @@ func (s *Server) handleDeanonymize(w http.ResponseWriter, r *http.Request) {
 		"category": string(req.Category),
 		"outcome":  "success",
 	}).Inc()
+
+	tc := events.ExtractTraceContext(r.Header.Get("X-Trace-ID"), r.Header.Get("X-Span-ID"), r.Header.Get("X-Parent-Span-ID"), req.TenantID, user.UserID, r.Header.Get("X-Request-ID"))
+	s.pub.Publish(events.EventTransformExecuted(tc, string(req.Category), len(resp.Records)))
+	s.pub.Publish(events.EventDeanonymizationPerformed(tc, string(req.Category), len(resp.Records)))
+	s.hm.Fire(hooks.Event{
+		Type:     hooks.EventDeanonymizationPerformed,
+		TenantID: req.TenantID,
+		TraceID:  tc.TraceID,
+		SpanID:   tc.SpanID,
+		Data:     map[string]interface{}{"category": string(req.Category), "record_count": len(resp.Records)},
+		Ctx:      r.Context(),
+	})
+
+	// Honey-token data-layer detection: check deanonymized values against registry.
+	s.honeyTokenMu.RLock()
+	for _, ht := range s.honeyTokens {
+		if (ht.TenantID != "" && ht.TenantID != req.TenantID) || !ht.Enabled {
+			continue
+		}
+		for _, record := range resp.Records {
+			for _, htVal := range ht.Data {
+				for _, recVal := range record {
+					if fmt.Sprintf("%v", recVal) == htVal {
+						s.pub.Publish(events.EventHoneyTokenAccessed(tc, ht.TokenID, ht.Type, "deanonymize"))
+						break
+					}
+				}
+			}
+		}
+	}
+	s.honeyTokenMu.RUnlock()
+
 	jsonOK(w, resp)
 }
 
@@ -983,6 +1109,78 @@ func (s *Server) handleProcess(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, resp)
 }
 
+// handleGetPermissions returns the access level and allowed categories for a user.
+// Called by the orchestrator to obtain permission context before invoking Navigator.
+// GET /v1/vault/permissions/{userID}?tenant_id=…&department=…&role=…
+func (s *Server) handleGetPermissions(w http.ResponseWriter, r *http.Request) {
+	user := userFromCtx(r.Context())
+	if user == nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	userID := chi.URLParam(r, "userID")
+	if userID == "" {
+		jsonError(w, "userID path parameter required", http.StatusBadRequest)
+		return
+	}
+
+	// Build a lookup user from query params; fall back to the authenticated user's
+	// own attributes when looking up self.
+	targetUser := &model.User{
+		UserID:     userID,
+		TenantID:   r.URL.Query().Get("tenant_id"),
+		Department: r.URL.Query().Get("department"),
+		Role:       r.URL.Query().Get("role"),
+	}
+	if targetUser.TenantID == "" {
+		targetUser.TenantID = tenantFromCtx(r.Context())
+	}
+	if targetUser.Department == "" {
+		targetUser.Department = user.Department
+	}
+	if targetUser.Role == "" {
+		targetUser.Role = user.Role
+	}
+
+	allCategories := []model.DataCategory{
+		model.CategoryCustomer,
+		model.CategoryManufacturing,
+		model.CategoryHRFinance,
+	}
+
+	type categoryPermission struct {
+		Category    string `json:"category"`
+		AccessLevel string `json:"access_level"`
+		Allowed     bool   `json:"allowed"`
+	}
+
+	perms := make([]categoryPermission, 0, len(allCategories))
+	allowedCategories := make([]model.DataCategory, 0)
+	highestLevel := model.AccessNone
+
+	for _, cat := range allCategories {
+		decision, err := s.controller.Decide(r.Context(), targetUser, cat)
+		if err != nil || !decision.Allowed {
+			perms = append(perms, categoryPermission{Category: string(cat), AccessLevel: string(model.AccessNone), Allowed: false})
+			continue
+		}
+		perms = append(perms, categoryPermission{Category: string(cat), AccessLevel: string(decision.AccessLevel), Allowed: true})
+		allowedCategories = append(allowedCategories, cat)
+		if model.AccessLevelRank(decision.AccessLevel) > model.AccessLevelRank(highestLevel) {
+			highestLevel = decision.AccessLevel
+		}
+	}
+
+	jsonOK(w, map[string]any{
+		"user_id":            userID,
+		"tenant_id":          targetUser.TenantID,
+		"access_level":       string(highestLevel),
+		"allowed_categories": allowedCategories,
+		"permissions":        perms,
+	})
+}
+
 func jsonOK(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(v) //nolint:errcheck
@@ -992,4 +1190,184 @@ func jsonError(w http.ResponseWriter, msg string, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(map[string]string{"error": msg}) //nolint:errcheck
+}
+
+// ─── Honey-token handlers ─────────────────────────────────────────────────────
+
+// GET /v1/vault/honey-tokens
+func (s *Server) handleListHoneyTokens(w http.ResponseWriter, r *http.Request) {
+	tenantID := r.URL.Query().Get("tenant_id")
+	s.honeyTokenMu.RLock()
+	tokens := make([]*model.HoneyToken, 0, len(s.honeyTokens))
+	for _, t := range s.honeyTokens {
+		if tenantID == "" || t.TenantID == tenantID {
+			tokens = append(tokens, t)
+		}
+	}
+	s.honeyTokenMu.RUnlock()
+	jsonOK(w, map[string]any{"honey_tokens": tokens, "total": len(tokens)})
+}
+
+// POST /v1/vault/honey-tokens
+func (s *Server) handleCreateHoneyToken(w http.ResponseWriter, r *http.Request) {
+	var req model.HoneyTokenCreateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Name == "" || req.Type == "" {
+		jsonError(w, "name and type are required", http.StatusBadRequest)
+		return
+	}
+
+	tenantID := r.URL.Query().Get("tenant_id")
+
+	token := &model.HoneyToken{
+		TokenID:   uuid.New().String(),
+		Name:      req.Name,
+		Type:      req.Type,
+		Category:  req.Category,
+		Data:      req.Data,
+		CreatedAt: time.Now(),
+		Enabled:   true,
+		TenantID:  tenantID,
+		Metadata:  req.Metadata,
+	}
+
+	s.honeyTokenMu.Lock()
+	s.honeyTokens[token.TokenID] = token
+	s.honeyTokenMu.Unlock()
+
+	tc := events.ExtractTraceContext(
+		r.Header.Get("X-Trace-ID"), r.Header.Get("X-Span-ID"),
+		r.Header.Get("X-Parent-Span-ID"), tenantID, "", "",
+	)
+	s.pub.Publish(events.EventHoneyTokenCreated(tc, token.TokenID, token.Type))
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(token) //nolint:errcheck
+}
+
+// POST /v1/vault/honey-tokens/{id}/inject
+func (s *Server) handleInjectHoneyToken(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	s.honeyTokenMu.Lock()
+	token, ok := s.honeyTokens[id]
+	if !ok {
+		s.honeyTokenMu.Unlock()
+		jsonError(w, "honey token not found", http.StatusNotFound)
+		return
+	}
+	now := time.Now()
+	token.Injected = true
+	token.InjectedAt = &now
+	s.honeyTokenMu.Unlock()
+
+	tc := events.ExtractTraceContext(
+		r.Header.Get("X-Trace-ID"), r.Header.Get("X-Span-ID"),
+		r.Header.Get("X-Parent-Span-ID"), token.TenantID, "", "",
+	)
+	s.pub.Publish(events.EventHoneyTokenInjected(tc, token.TokenID, token.Category, 0))
+
+	jsonOK(w, map[string]any{"token_id": id, "injected": true, "injected_at": now})
+}
+
+// DELETE /v1/vault/honey-tokens/{id}
+func (s *Server) handleDeleteHoneyToken(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	s.honeyTokenMu.Lock()
+	_, ok := s.honeyTokens[id]
+	if ok {
+		delete(s.honeyTokens, id)
+	}
+	s.honeyTokenMu.Unlock()
+	if !ok {
+		jsonError(w, "honey token not found", http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ─── POST /v1/vault/llm/complete ─────────────────────────────────────────────
+
+func (s *Server) handleLLMComplete(w http.ResponseWriter, r *http.Request) {
+	if s.llmConn == nil {
+		jsonError(w, "cloud LLM connector is not enabled", http.StatusServiceUnavailable)
+		return
+	}
+
+	user := userFromCtx(r.Context())
+	if user == nil {
+		jsonError(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	var req cloudllm.LLMCallRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, fmt.Sprintf("invalid request: %v", err), http.StatusBadRequest)
+		return
+	}
+	if len(req.Messages) == 0 {
+		jsonError(w, "messages must not be empty", http.StatusBadRequest)
+		return
+	}
+
+	// Enforce tenant isolation.
+	authTenantID := tenantFromCtx(r.Context())
+	if req.TenantID != "" && req.TenantID != authTenantID {
+		jsonError(w, "cross-tenant access denied", http.StatusForbidden)
+		return
+	}
+	req.TenantID = authTenantID
+	if req.UserID == "" {
+		req.UserID = user.UserID
+	}
+
+	tc := events.ExtractTraceContext(
+		r.Header.Get("X-Trace-ID"), r.Header.Get("X-Span-ID"),
+		r.Header.Get("X-Parent-Span-ID"), authTenantID, user.UserID,
+		r.Header.Get("X-Request-ID"),
+	)
+
+	resp, err := s.llmConn.Call(r.Context(), tc, req)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	jsonOK(w, resp)
+}
+
+// buildCloudLLMConnector constructs the Connector from config.
+func buildCloudLLMConnector(cfg *config.Config, eng *anonymizer.Engine, pub *events.Publisher) *cloudllm.Connector {
+	providers := make([]cloudllm.CloudLLMProvider, 0, len(cfg.CloudLLM.Providers))
+	for _, pc := range cfg.CloudLLM.Providers {
+		ts := pc.TimeoutS
+		if ts == 0 {
+			ts = 30
+		}
+		switch pc.Type {
+		case "openai":
+			providers = append(providers, cloudllm.NewOpenAIProvider(pc.APIKeyKMS, pc.Model, ts))
+		case "claude":
+			providers = append(providers, cloudllm.NewClaudeProvider(pc.APIKeyKMS, pc.Model, ts))
+		default:
+			providers = append(providers, cloudllm.NewCustomProvider(pc.ID, pc.Endpoint, pc.APIKeyKMS, pc.Model, ts))
+		}
+	}
+	if len(providers) == 0 {
+		return nil
+	}
+	// Re-order so the default provider is first.
+	if cfg.CloudLLM.DefaultProvider != "" {
+		for i, p := range providers {
+			if p.ID() == cfg.CloudLLM.DefaultProvider {
+				providers[0], providers[i] = providers[i], providers[0]
+				break
+			}
+		}
+	}
+	return cloudllm.NewConnector(providers, eng, pub)
 }
