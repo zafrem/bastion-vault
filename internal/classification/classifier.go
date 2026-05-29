@@ -1,12 +1,15 @@
 package classification
 
 import (
+	"os"
 	"regexp"
 	"strings"
 
 	"github.com/zafrem/bastion-vault/internal/model"
 )
 
+// Hardcoded fallback patterns — used when BASTION_PATTERN_DIR is not set or
+// the YAML file for a given pattern type is missing / fails to parse.
 var (
 	reKoreanRRN    = regexp.MustCompile(`\d{6}-[1-4]\d{6}`)
 	reKoreanMobile = regexp.MustCompile(`01[016789]-?\d{3,4}-?\d{4}`)
@@ -16,6 +19,16 @@ var (
 	reDateOfBirth  = regexp.MustCompile(`\d{4}[-/]\d{2}[-/]\d{2}`)
 	reSalary       = regexp.MustCompile(`(?i)(salary|wage|compensation|급여|연봉)`)
 )
+
+// _loadedPatterns is populated at init time from pii-pattern-engine YAML when
+// BASTION_PATTERN_DIR points to the regex root of the submodule.
+var _loadedPatterns map[model.PIIType][]*regexp.Regexp
+
+func init() {
+	if dir := os.Getenv("BASTION_PATTERN_DIR"); dir != "" {
+		_loadedPatterns = LoadPatternsFromDir(dir)
+	}
+}
 
 // piiFieldHints maps field names (lowercased) to PII type hints
 var piiFieldHints = map[string]model.PIIType{
@@ -154,15 +167,15 @@ func (c *Classifier) detectField(field, value string) (model.PIIType, float64) {
 		}
 	}
 
-	// Value-pattern fallback
+	// Value-pattern fallback — loaded patterns preferred, hardcoded as fallback.
 	switch {
-	case reKoreanRRN.MatchString(value):
+	case matchesLoaded(model.PIIKoreanRRN, value) || reKoreanRRN.MatchString(value):
 		return model.PIIKoreanRRN, 0.90
 	case reEmail.MatchString(value):
 		return model.PIIEmail, 0.90
 	case reCreditCard.MatchString(value):
 		return model.PIICreditCard, 0.85
-	case reKoreanMobile.MatchString(value):
+	case matchesLoaded(model.PIIKoreanMobile, value) || reKoreanMobile.MatchString(value):
 		return model.PIIKoreanMobile, 0.85
 	case reDateOfBirth.MatchString(value) && (strings.Contains(lower, "birth") || strings.Contains(lower, "dob") || strings.Contains(lower, "생년")):
 		return model.PIIDateOfBirth, 0.80
