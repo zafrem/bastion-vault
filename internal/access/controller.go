@@ -183,6 +183,7 @@ type opaUser struct {
 
 type opaResource struct {
 	Category string `json:"category"`
+	Purpose  string `json:"purpose,omitempty"` // MR-04-003
 }
 
 type opaAllowResponse struct {
@@ -338,6 +339,82 @@ func mapOPAAccessLevel(s string, fallback model.AccessLevel) model.AccessLevel {
 	default:
 		return fallback
 	}
+}
+
+// purposeMatrix defines which roles/departments are permitted for a given purpose × category.
+// A missing entry means the purpose is permitted (default-allow for non-sensitive purposes).
+// training_data is never permitted via standard RBAC; it requires a break-glass override.
+var purposeMatrix = map[model.Purpose]map[model.DataCategory][]string{
+	model.PurposeHRAnalytics: {
+		model.CategoryHRFinance: {"hr", "executive", "audit"},
+	},
+	model.PurposeLegal: {
+		model.CategoryCustomer:      {"audit", "executive"},
+		model.CategoryHRFinance:     {"audit", "executive"},
+		model.CategoryManufacturing: {"audit", "executive"},
+	},
+	model.PurposeAudit: {
+		model.CategoryCustomer:      {"audit"},
+		model.CategoryHRFinance:     {"audit"},
+		model.CategoryManufacturing: {"audit"},
+	},
+}
+
+// DecideWithPurpose extends Decide with purpose × RBAC conjunction (MR-04-003).
+// Returns a PurposeViolation flag when RBAC allows but purpose check fails.
+func (c *Controller) DecideWithPurpose(
+	ctx context.Context,
+	user *model.User,
+	category model.DataCategory,
+	purpose model.Purpose,
+) (*model.AccessDecision, error) {
+	// training_data always requires explicit break-glass — never via standard path.
+	if purpose == model.PurposeTrainingData {
+		return &model.AccessDecision{
+			Allowed:          false,
+			AccessLevel:      model.AccessNone,
+			Reason:           "training_data purpose requires explicit break-glass authorisation",
+			PurposeViolation: true,
+		}, nil
+	}
+
+	// Step 1: standard RBAC check.
+	decision, err := c.Decide(ctx, user, category)
+	if err != nil || !decision.Allowed {
+		return decision, err
+	}
+
+	// Step 2: purpose check.
+	if !purposePermitted(purpose, user.Department, category) {
+		return &model.AccessDecision{
+			Allowed:          false,
+			AccessLevel:      model.AccessNone,
+			Reason:           fmt.Sprintf("purpose %q not permitted for department %q on category %s", purpose, user.Department, category),
+			PurposeViolation: true,
+		}, nil
+	}
+
+	return decision, nil
+}
+
+// purposePermitted returns true when the department is allowed to use the given
+// purpose for the given data category. When no restriction is defined for a
+// purpose × category pair, the access defaults to allowed.
+func purposePermitted(purpose model.Purpose, department string, category model.DataCategory) bool {
+	catMap, restricted := purposeMatrix[purpose]
+	if !restricted {
+		return true // no restriction defined for this purpose
+	}
+	allowedDepts, restricted := catMap[category]
+	if !restricted {
+		return true // purpose unrestricted for this category
+	}
+	for _, d := range allowedDepts {
+		if d == department {
+			return true
+		}
+	}
+	return false
 }
 
 // EnforceMinimumLevel checks that the requested access level does not exceed what is allowed.

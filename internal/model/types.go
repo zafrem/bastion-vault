@@ -60,6 +60,18 @@ const (
 	StrategyEncryption                AnonymizationStrategy = "encryption"
 )
 
+// Purpose identifies the declared access purpose for a request (MR-04).
+type Purpose string
+
+const (
+	PurposeCustomerSupport   Purpose = "customer_support"
+	PurposeAudit             Purpose = "audit"
+	PurposeHRAnalytics       Purpose = "hr_analytics"
+	PurposeProductDevelopment Purpose = "product_development"
+	PurposeLegal             Purpose = "legal"
+	PurposeTrainingData      Purpose = "training_data"
+)
+
 // AccessLevel represents the privilege tier for data access
 type AccessLevel string
 
@@ -256,10 +268,11 @@ type User struct {
 
 // AccessDecision is the result of an OPA policy evaluation
 type AccessDecision struct {
-	Allowed     bool        `json:"allowed"`
-	AccessLevel AccessLevel `json:"access_level"`
-	Reason      string      `json:"reason"`
-	Conditions  []string    `json:"conditions,omitempty"`
+	Allowed         bool        `json:"allowed"`
+	AccessLevel     AccessLevel `json:"access_level"`
+	Reason          string      `json:"reason"`
+	Conditions      []string    `json:"conditions,omitempty"`
+	PurposeViolation bool       `json:"purpose_violation,omitempty"` // MR-04-003
 }
 
 // TenantConfig holds per-tenant customization
