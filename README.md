@@ -679,6 +679,16 @@ The deployment includes:
 | K-anonymity validation | < 50 ms   |
 
 ---
+## Documentation
+- [Design Document](DESIGN.md)
+- [SRS Document](bastion_vault_srs_v1.0_en.md)
+- [Output SRS Document](bastion_vault_output_srs_v1.0_en.md)
+
+**Technical deep-dives (code-based):**
+- [Multi-Tenancy](docs/multi-tenancy.md)
+- [Deterministic De-identification](docs/deterministic-deidentification.md)
+- [Data Steward Role](docs/data-steward.md)
+
 ## Other Module
   * [Sentinel](https://github.com/zafrem/bastion-sentinel)
   * [Navigator](https://github.com/zafrem/bastion-navigator)

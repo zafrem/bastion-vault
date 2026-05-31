@@ -277,12 +277,17 @@ type AccessDecision struct {
 
 // TenantConfig holds per-tenant customization
 type TenantConfig struct {
-	ID            string            `json:"id"`
-	Name          string            `json:"name"`
-	KMSKeyID      string            `json:"kms_key_id"`
-	HMACKeyID     string            `json:"hmac_key_id"`
-	AuditKeyID    string            `json:"audit_key_id"`
-	CustomPolicies map[string]any   `json:"custom_policies,omitempty"`
+	ID             string              `json:"id"`
+	Name           string              `json:"name"`
+	KMSKeyID       string              `json:"kms_key_id"`
+	HMACKeyID      string              `json:"hmac_key_id"`
+	AuditKeyID     string              `json:"audit_key_id"`
+	CustomPolicies map[string]any      `json:"custom_policies,omitempty"`
+	// StewardDomains maps department name → list of data domains the department
+	// may act as steward for. A data steward may update permitted_purposes on
+	// documents in their assigned domains but may not read document content
+	// (MR-04-004).
+	StewardDomains map[string][]string `json:"steward_domains,omitempty"`
 }
 
 // ---------- Phase 2 (Vault-OUT) types ----------

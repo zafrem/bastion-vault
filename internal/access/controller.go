@@ -15,6 +15,10 @@ import (
 
 // rbacMatrix encodes the SRS §3.5 RBAC table.
 // Key format: "department:role" → category → AccessLevel
+//
+// data_steward: AccessNone for all data categories — a steward manages
+// permitted_purposes on documents in their domain but never reads content
+// directly (separation of authority per MR-04-004).
 var rbacMatrix = map[string]map[model.DataCategory]model.AccessLevel{
 	"marketing:manager": {
 		model.CategoryCustomer:      model.AccessFull,
@@ -56,6 +60,19 @@ var rbacMatrix = map[string]map[model.DataCategory]model.AccessLevel{
 		model.CategoryManufacturing: model.AccessAuditLog,
 		model.CategoryHRFinance:     model.AccessAuditLog,
 	},
+	// data_steward: content-blind — AccessNone for every data category.
+	// The steward operation (update permitted_purposes) is a separate action
+	// checked by CanActAsSteward, not by the standard RBAC path.
+	"hr:data_steward": {
+		model.CategoryCustomer:      model.AccessNone,
+		model.CategoryManufacturing: model.AccessNone,
+		model.CategoryHRFinance:     model.AccessNone,
+	},
+	"audit:data_steward": {
+		model.CategoryCustomer:      model.AccessNone,
+		model.CategoryManufacturing: model.AccessNone,
+		model.CategoryHRFinance:     model.AccessNone,
+	},
 }
 
 // deanonymizeRoles lists the role keys that have deanonymize rights per SRS §3.5
@@ -64,11 +81,19 @@ var deanonymizeRoles = map[string]map[model.DataCategory]bool{
 	"hr:manager":        {model.CategoryHRFinance: true},
 }
 
+// stewardRegistry maps tenantID → department → allowed domain list.
+// Populated from TenantConfig.StewardDomains at startup or via RegisterSteward.
+// Protected by the Controller's implicit serialization (callers hold no lock —
+// mutations are expected at startup only; concurrent writes need an RWMutex in
+// production).
+type stewardRegistry map[string]map[string][]string
+
 // Controller makes access control decisions using an embedded RBAC matrix
 // and optionally delegates to OPA for complex policy evaluation.
 type Controller struct {
 	opaEndpoint string // empty = OPA disabled, use built-in RBAC only
 	httpClient  *http.Client
+	stewards    stewardRegistry
 }
 
 // NewController creates a Controller. Pass an empty opaEndpoint to use built-in RBAC only.
@@ -78,7 +103,49 @@ func NewController(opaEndpoint string) *Controller {
 		httpClient: &http.Client{
 			Timeout: 2 * time.Second,
 		},
+		stewards: make(stewardRegistry),
 	}
+}
+
+// RegisterSteward records that department in tenantID may act as data steward
+// for the given domains (MR-04-004). Typically called during startup from
+// TenantConfig.StewardDomains.
+func (c *Controller) RegisterSteward(tenantID, department string, domains []string) {
+	if c.stewards == nil {
+		c.stewards = make(stewardRegistry)
+	}
+	if c.stewards[tenantID] == nil {
+		c.stewards[tenantID] = make(map[string][]string)
+	}
+	c.stewards[tenantID][department] = domains
+}
+
+// LoadStewardsFromTenant reads StewardDomains from a TenantConfig and registers them.
+func (c *Controller) LoadStewardsFromTenant(cfg *model.TenantConfig) {
+	for dept, domains := range cfg.StewardDomains {
+		c.RegisterSteward(cfg.ID, dept, domains)
+	}
+}
+
+// CanActAsSteward returns true when the user's department is registered as a
+// data steward for domain in their tenant. A steward may update
+// permitted_purposes on documents in that domain but may not read content
+// (enforced by the AccessNone entry in rbacMatrix for the data_steward role).
+func (c *Controller) CanActAsSteward(user *model.User, domain string) bool {
+	tenantDomains, ok := c.stewards[user.TenantID]
+	if !ok {
+		return false
+	}
+	allowedDomains, ok := tenantDomains[user.Department]
+	if !ok {
+		return false
+	}
+	for _, d := range allowedDomains {
+		if d == domain {
+			return true
+		}
+	}
+	return false
 }
 
 // Decide returns an AccessDecision for the given user and data category.
