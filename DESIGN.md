@@ -1,7 +1,7 @@
 # Bastion-Vault Design Document
 
 ## 1. Introduction
-Bastion-Vault is Module B of the Bastion RAG Security Governance Framework. It serves as the authoritative layer for data privacy, isolation, and anonymization. Vault ensures that sensitive information is protected during storage (Phase 1) and that access is strictly controlled and dynamically sanitized during retrieval (Phase 2).
+Bastion-Vault is Module B of the Bastion-RAG Security Governance Framework. It serves as the authoritative layer for data privacy, isolation, and anonymization. Vault ensures that sensitive information is protected during storage (Phase 1) and that access is strictly controlled and dynamically sanitized during retrieval (Phase 2).
 
 ### 1.1 Core Objectives
 - **Multi-Tenancy Isolation:** Cryptographic and logical separation of data between tenants.

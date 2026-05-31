@@ -377,7 +377,7 @@ func (c *Controller) Decide(ctx context.Context, user *model.User, category mode
 // an OPA outage should not take down the Vault service.
 func (c *Controller) evaluateOPA(...) (*model.AccessDecision, error) {
     // ...
-    allowed, err := c.queryOPABool(ctx, c.opaEndpoint+"/v1/data/bastion/vault/access/allow", bodyBytes)
+    allowed, err := c.queryOPABool(ctx, c.opaEndpoint+"/v1/data/bastion-rag/vault/access/allow", bodyBytes)
     if err != nil {
         log.Printf("access: OPA allow query failed: %v — falling back to RBAC", err)
         return c.rbacDecision(fallback), nil  // fallback is the RBAC-computed level

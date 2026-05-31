@@ -1,6 +1,6 @@
 # bastion-vault
 
-**Module B of the Bastion RAG Security Governance Framework**
+**Module B of the Bastion-RAG Security Governance Framework**
 
 bastion-vault is a privacy-preserving data anonymization service written in Go. It implements a two-phase pipeline:
 
@@ -15,7 +15,7 @@ All operations are RBAC-enforced, KMS-backed, and fully audit-trailed for PIPA (
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│                            Bastion Vault                               │
+│                            Bastion-RAG Vault                               │
 │                                                                        │
 │  ┌─────────┐   ┌──────────────┐   ┌────────────────────────────────┐   │
 │  │  CLI    │   │  REST :8080  │   │        gRPC :9090              │   │
@@ -626,9 +626,9 @@ Services started:
 
 ```bash
 # Apply namespace and secrets
-kubectl create namespace bastion
+kubectl create namespace bastion-rag
 kubectl create secret generic bastion-vault-secrets \
-  --namespace bastion \
+  --namespace bastion-rag \
   --from-literal=master-key=$(openssl rand -hex 32) \
   --from-literal=database-dsn="postgres://vault:..."
 
