@@ -136,7 +136,7 @@ func newServerCmd() *cobra.Command {
 			stopRetention := audit.StartRetentionWorker(cmd.Context(), cfg.Audit.OutputDir, cfg.Audit.Retention)
 			defer stopRetention()
 
-			cls := classification.New()
+			cls := classification.NewWithPatterns(cfg.Classification.Patterns)
 			store, err := newTokenStore(cfg)
 			if err != nil {
 				return err
@@ -248,7 +248,7 @@ func newAnonymizeCmd() *cobra.Command {
 				return err
 			}
 
-			eng := anonymizer.NewEngine(mgr, classification.New(), aud, tokendb.NewMemoryStore())
+			eng := anonymizer.NewEngine(mgr, classification.NewWithPatterns(cfg.Classification.Patterns), aud, tokendb.NewMemoryStore())
 			req := &model.AnonymizeRequest{
 				TenantID:    "cli",
 				Category:    model.DataCategory(category),
@@ -296,7 +296,11 @@ func newDetectPIICmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			cls := classification.New()
+			cfg, err := config.Load(cfgFile)
+			if err != nil {
+				return err
+			}
+			cls := classification.NewWithPatterns(cfg.Classification.Patterns)
 			for i, rec := range records {
 				detections := cls.DetectPII(rec)
 				printBox(fmt.Sprintf("Record %d PII Detections", i+1), func() []string {
@@ -329,7 +333,11 @@ func newClassifyCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			result := classification.New().Classify(records)
+			cfg, err := config.Load(cfgFile)
+			if err != nil {
+				return err
+			}
+			result := classification.NewWithPatterns(cfg.Classification.Patterns).Classify(records)
 			printBox("Classification Result", []string{
 				fmt.Sprintf("Category       : %s", result.Category),
 				fmt.Sprintf("K-Threshold    : %d", result.KThreshold),

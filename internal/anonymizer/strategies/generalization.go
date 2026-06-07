@@ -68,7 +68,8 @@ func generalizeRegion(value string, level int) string {
 		return ""
 	}
 	if level >= 1 && len(parts) > 0 {
-		// Remove dong-level (last part if it ends with 동/로/길)
+		// Remove the dong-level token: drop the last part when it ends with a
+		// dong/ro/gil suffix (the 동/로/길 characters matched just below).
 		last := parts[len(parts)-1]
 		if strings.HasSuffix(last, "동") || strings.HasSuffix(last, "로") || strings.HasSuffix(last, "길") {
 			parts = parts[:len(parts)-1]
@@ -142,12 +143,12 @@ func generalizeSalaryRange(value string, level int) (string, error) {
 		return value, nil
 	}
 
-	// Treat values as KRW; normalise to 만원 (10,000 KRW units)
+	// Treat values as KRW; normalise to man-won units (1 man-won = 10,000 KRW)
 	if n > 10000 {
 		n = n / 10000
 	}
 
-	var step int64 = 500 // 500만원 brackets (level 1)
+	var step int64 = 500 // brackets of 500 man-won = 5,000,000 KRW (level 1)
 	if level >= 2 {
 		step = 1000
 	}

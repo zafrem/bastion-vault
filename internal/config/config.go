@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/spf13/viper"
+	"github.com/zafrem/bastion-vault/internal/classification"
 )
 
 // Config is the root configuration structure populated from vault.yaml + env overrides
@@ -21,15 +22,26 @@ type Config struct {
 	Auth       AuthConfig       `mapstructure:"auth"`
 	TokenStore TokenStoreConfig `mapstructure:"token_store"`
 	RateLimit  RateLimitConfig  `mapstructure:"rate_limit"`
-	Events     EventsConfig     `mapstructure:"events"`
-	CloudLLM   CloudLLMConfig   `mapstructure:"cloud_llm"`
+	Events         EventsConfig         `mapstructure:"events"`
+	CloudLLM       CloudLLMConfig       `mapstructure:"cloud_llm"`
+	Classification ClassificationConfig `mapstructure:"classification"`
+}
+
+// ClassificationConfig holds overrides for the PII value-pattern fallback set
+// used by the classifier. Empty fields fall back to the built-in defaults
+// (classification.DefaultPatternSet).
+type ClassificationConfig struct {
+	Patterns classification.PatternSet `mapstructure:"patterns"`
 }
 
 // CloudLLMConfig configures the Cloud LLM Connector extension (doc 21).
 type CloudLLMConfig struct {
-	Enabled         bool                    `mapstructure:"enabled"`
+	Enabled         bool                     `mapstructure:"enabled"`
 	Providers       []CloudLLMProviderConfig `mapstructure:"providers"`
 	DefaultProvider string                   `mapstructure:"default_provider"`
+	// TokenPattern overrides the regex used to detect Vault tokens in LLM
+	// responses for de-anonymization. Empty uses cloudllm.DefaultTokenPattern.
+	TokenPattern string `mapstructure:"token_pattern"`
 }
 
 // CloudLLMProviderConfig describes a single cloud LLM provider.

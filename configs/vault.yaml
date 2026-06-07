@@ -68,3 +68,26 @@ rate_limit:
   enabled: false
   rps: 100
   burst: 200
+
+# ── Configurable detection patterns ───────────────────────────────────────────
+# All regexes below are optional. When omitted (or left empty) the built-in
+# defaults shown in each comment are used, so behavior is unchanged unless you
+# supply an override. An invalid override falls back to the default.
+
+# cloud_llm:
+#   # Regex that detects Vault deterministic tokens in cloud-LLM responses so
+#   # they can be de-anonymized before being returned to the caller.
+#   # Default:
+#   token_pattern: "[A-Z]{2,}_[A-Z]{2,}_[a-z0-9]{16}"
+
+# classification:
+#   # PII detection regexes used by the data classifier. Each field defaults to
+#   # the value shown below.
+#   patterns:
+#     korean_rrn:     "\\d{6}-[1-4]\\d{6}"
+#     korean_mobile:  "01[016789]-?\\d{3,4}-?\\d{4}"
+#     email:          "[a-zA-Z0-9._%+\\-]+@[a-zA-Z0-9.\\-]+\\.[a-zA-Z]{2,}"
+#     credit_card:    "\\d{4}[-\\s]?\\d{4}[-\\s]?\\d{4}[-\\s]?\\d{4}"
+#     korean_name:    "^[\\p{Hangul}]{2,5}$"
+#     date_of_birth:  "\\d{4}[-/]\\d{2}[-/]\\d{2}"
+#     salary:         "(?i)(salary|wage|compensation|급여|연봉)"
