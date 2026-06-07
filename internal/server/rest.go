@@ -1369,5 +1369,5 @@ func buildCloudLLMConnector(cfg *config.Config, eng *anonymizer.Engine, pub *eve
 			}
 		}
 	}
-	return cloudllm.NewConnector(providers, eng, pub)
+	return cloudllm.NewConnector(providers, eng, pub, cfg.CloudLLM.TokenPattern)
 }

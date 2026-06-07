@@ -22,14 +22,18 @@ type Connector struct {
 	defaultID string
 	engine    *anonymizer.Engine
 	pub       *events.Publisher
+	tokenRE   *regexp.Regexp
 }
 
 // NewConnector builds a Connector from the provided providers.
-// The first provider in the slice is the default.
+// The first provider in the slice is the default. An optional tokenPattern
+// overrides DefaultTokenPattern used to detect Vault tokens in LLM responses;
+// an empty or invalid pattern falls back to the default.
 func NewConnector(
 	providers []CloudLLMProvider,
 	eng *anonymizer.Engine,
 	pub *events.Publisher,
+	tokenPattern ...string,
 ) *Connector {
 	byID := make(map[string]CloudLLMProvider, len(providers))
 	defaultID := ""
@@ -39,11 +43,19 @@ func NewConnector(
 			defaultID = p.ID()
 		}
 	}
+	re := tokenPattern
+	tokenRE := tokenPatternDefault
+	if len(re) > 0 && re[0] != "" {
+		if compiled, err := regexp.Compile(re[0]); err == nil {
+			tokenRE = compiled
+		}
+	}
 	return &Connector{
 		providers: byID,
 		defaultID: defaultID,
 		engine:    eng,
 		pub:       pub,
+		tokenRE:   tokenRE,
 	}
 }
 
@@ -150,7 +162,7 @@ func (c *Connector) deanonymizeText(
 	category model.DataCategory,
 	tenantID, userID string,
 ) (string, int, int) {
-	tokens := extractTokens(text)
+	tokens := c.tokenRE.FindAllString(text, -1)
 	if len(tokens) == 0 {
 		return text, 0, 0
 	}
@@ -173,11 +185,16 @@ func (c *Connector) deanonymizeText(
 
 // ─── token utilities ──────────────────────────────────────────────────────────
 
-// tokenPattern matches Vault deterministic tokens of the form PREFIX_TYPE_hex16.
-var tokenPattern = regexp.MustCompile(`[A-Z]{2,}_[A-Z]{2,}_[a-z0-9]{16}`)
+// DefaultTokenPattern matches Vault deterministic tokens of the form
+// PREFIX_TYPE_hex16. Override via cloud_llm.token_pattern in vault.yaml.
+const DefaultTokenPattern = `[A-Z]{2,}_[A-Z]{2,}_[a-z0-9]{16}`
+
+// tokenPatternDefault is the compiled DefaultTokenPattern used when a Connector
+// is built without an override.
+var tokenPatternDefault = regexp.MustCompile(DefaultTokenPattern)
 
 func extractTokens(text string) []string {
-	return tokenPattern.FindAllString(text, -1)
+	return tokenPatternDefault.FindAllString(text, -1)
 }
 
 func countDeanonymized(original, restored string, tokens []string) int {

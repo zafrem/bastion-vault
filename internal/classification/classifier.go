@@ -8,17 +8,60 @@ import (
 	"github.com/zafrem/bastion-vault/internal/model"
 )
 
-// Hardcoded fallback patterns — used when BASTION_PATTERN_DIR is not set or
-// the YAML file for a given pattern type is missing / fails to parse.
-var (
-	reKoreanRRN    = regexp.MustCompile(`\d{6}-[1-4]\d{6}`)
-	reKoreanMobile = regexp.MustCompile(`01[016789]-?\d{3,4}-?\d{4}`)
-	reEmail        = regexp.MustCompile(`[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}`)
-	reCreditCard   = regexp.MustCompile(`\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}`)
-	reKoreanName   = regexp.MustCompile(`^[\p{Hangul}]{2,5}$`)
-	reDateOfBirth  = regexp.MustCompile(`\d{4}[-/]\d{2}[-/]\d{2}`)
-	reSalary       = regexp.MustCompile(`(?i)(salary|wage|compensation|급여|연봉)`)
-)
+// PatternSet holds the value-level fallback regexes used when a field-name hint
+// does not resolve a PII type. Each field is a regex string so the whole set can
+// be supplied from configuration (classification.patterns in vault.yaml). Empty
+// fields fall back to the corresponding DefaultPatternSet entry.
+type PatternSet struct {
+	KoreanRRN    string `mapstructure:"korean_rrn"`
+	KoreanMobile string `mapstructure:"korean_mobile"`
+	Email        string `mapstructure:"email"`
+	CreditCard   string `mapstructure:"credit_card"`
+	KoreanName   string `mapstructure:"korean_name"`
+	DateOfBirth  string `mapstructure:"date_of_birth"`
+	Salary       string `mapstructure:"salary"`
+}
+
+// DefaultPatternSet returns the built-in fallback patterns. These are used when
+// BASTION_PATTERN_DIR is not set (or a YAML file is missing) and no config
+// override is provided.
+func DefaultPatternSet() PatternSet {
+	return PatternSet{
+		KoreanRRN:    `\d{6}-[1-4]\d{6}`,
+		KoreanMobile: `01[016789]-?\d{3,4}-?\d{4}`,
+		Email:        `[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}`,
+		CreditCard:   `\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}`,
+		KoreanName:   `^[\p{Hangul}]{2,5}$`,
+		DateOfBirth:  `\d{4}[-/]\d{2}[-/]\d{2}`,
+		Salary:       `(?i)(salary|wage|compensation|급여|연봉)`,
+	}
+}
+
+// compiledPatterns holds the compiled value-level regexes for a Classifier.
+type compiledPatterns struct {
+	koreanRRN, koreanMobile, email, creditCard, koreanName, dateOfBirth, salary *regexp.Regexp
+}
+
+func compilePatternSet(ps PatternSet) compiledPatterns {
+	def := DefaultPatternSet()
+	pick := func(override, fallback string) *regexp.Regexp {
+		if override != "" {
+			if re, err := regexp.Compile(override); err == nil {
+				return re
+			}
+		}
+		return regexp.MustCompile(fallback)
+	}
+	return compiledPatterns{
+		koreanRRN:    pick(ps.KoreanRRN, def.KoreanRRN),
+		koreanMobile: pick(ps.KoreanMobile, def.KoreanMobile),
+		email:        pick(ps.Email, def.Email),
+		creditCard:   pick(ps.CreditCard, def.CreditCard),
+		koreanName:   pick(ps.KoreanName, def.KoreanName),
+		dateOfBirth:  pick(ps.DateOfBirth, def.DateOfBirth),
+		salary:       pick(ps.Salary, def.Salary),
+	}
+}
 
 // _loadedPatterns is populated at init time from pii-pattern-engine YAML when
 // BASTION_PATTERN_DIR points to the regex root of the submodule.
@@ -104,9 +147,18 @@ var defaultKThresholds = map[model.DataCategory]int{
 }
 
 // Classifier detects PII fields and classifies records into data categories
-type Classifier struct{}
+type Classifier struct {
+	pat compiledPatterns
+}
 
-func New() *Classifier { return &Classifier{} }
+// New builds a Classifier with the built-in default fallback patterns.
+func New() *Classifier { return NewWithPatterns(DefaultPatternSet()) }
+
+// NewWithPatterns builds a Classifier whose value-level fallback regexes come
+// from ps (empty fields fall back to DefaultPatternSet).
+func NewWithPatterns(ps PatternSet) *Classifier {
+	return &Classifier{pat: compilePatternSet(ps)}
+}
 
 // DetectPII scans the key-value pairs of a record and returns all PII findings
 func (c *Classifier) DetectPII(record map[string]any) []model.PIIDetection {
@@ -167,21 +219,21 @@ func (c *Classifier) detectField(field, value string) (model.PIIType, float64) {
 		}
 	}
 
-	// Value-pattern fallback — loaded patterns preferred, hardcoded as fallback.
+	// Value-pattern fallback — loaded patterns preferred, configured set as fallback.
 	switch {
-	case matchesLoaded(model.PIIKoreanRRN, value) || reKoreanRRN.MatchString(value):
+	case matchesLoaded(model.PIIKoreanRRN, value) || c.pat.koreanRRN.MatchString(value):
 		return model.PIIKoreanRRN, 0.90
-	case reEmail.MatchString(value):
+	case c.pat.email.MatchString(value):
 		return model.PIIEmail, 0.90
-	case reCreditCard.MatchString(value):
+	case c.pat.creditCard.MatchString(value):
 		return model.PIICreditCard, 0.85
-	case matchesLoaded(model.PIIKoreanMobile, value) || reKoreanMobile.MatchString(value):
+	case matchesLoaded(model.PIIKoreanMobile, value) || c.pat.koreanMobile.MatchString(value):
 		return model.PIIKoreanMobile, 0.85
-	case reDateOfBirth.MatchString(value) && (strings.Contains(lower, "birth") || strings.Contains(lower, "dob") || strings.Contains(lower, "생년")):
+	case c.pat.dateOfBirth.MatchString(value) && (strings.Contains(lower, "birth") || strings.Contains(lower, "dob") || strings.Contains(lower, "생년")):
 		return model.PIIDateOfBirth, 0.80
-	case reKoreanName.MatchString(value) && len([]rune(value)) <= 4:
+	case c.pat.koreanName.MatchString(value) && len([]rune(value)) <= 4:
 		return model.PIIKoreanName, 0.70
-	case reSalary.MatchString(value):
+	case c.pat.salary.MatchString(value):
 		return model.PIISalary, 0.75
 	}
 
