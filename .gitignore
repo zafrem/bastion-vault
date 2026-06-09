@@ -33,3 +33,6 @@ go.work.sum
 
 # Claude Code local state
 .claude/
+
+# Compiled binaries (reproducible via `go build`)
+bin/
