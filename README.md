@@ -164,6 +164,8 @@ export VAULT_AUTH_JWT_SECRET=$(openssl rand -hex 32)
 
 For local development only, `auth.skip_auth: true` disables token checks entirely.
 
+The gRPC API is authenticated the same way as REST: send the JWT as `authorization: Bearer <token>` call metadata (only `Health` is public). The tenant and caller identity come from the token (`tenant` and `sub` claims), not from the request body. A request that names a different `tenant_id` fails with `PermissionDenied`, and the same RBAC/OPA decision applies as for REST. Revoked tokens fail with `Unauthenticated`, and, as for REST, a revocation-list outage fails closed (`Unavailable`).
+
 ### 3. Run the server locally
 
 ```bash

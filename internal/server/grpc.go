@@ -76,6 +76,7 @@ type grpcHealthResponse struct {
 
 // GRPCServer is the gRPC service implementation.
 type GRPCServer struct {
+	auth       *grpcAuth // nil until EnableAuth
 	engine     *anonymizer.Engine
 	classifier *classification.Classifier
 	kanon      *kanon.Validator
@@ -109,6 +110,20 @@ func (g *GRPCServer) anonymize(ctx context.Context, dec func(any) error, interce
 	}
 	handler := func(ctx context.Context, req any) (any, error) {
 		r := req.(*grpcAnonymizeRequest)
+		user, err := g.caller(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if user != nil {
+			// Identity comes from the token, never from the request body.
+			if r.TenantID, err = bindTenant(user, r.TenantID); err != nil {
+				return nil, err
+			}
+			r.RequesterID = user.UserID
+			if err := g.authorize(ctx, user, r.Category, false); err != nil {
+				return nil, err
+			}
+		}
 		return g.engine.Anonymize(ctx, &model.AnonymizeRequest{
 			TenantID:    r.TenantID,
 			Category:    r.Category,
@@ -131,6 +146,19 @@ func (g *GRPCServer) deanonymize(ctx context.Context, dec func(any) error, inter
 	}
 	handler := func(ctx context.Context, req any) (any, error) {
 		r := req.(*grpcDeanonymizeRequest)
+		user, err := g.caller(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if user != nil {
+			if r.TenantID, err = bindTenant(user, r.TenantID); err != nil {
+				return nil, err
+			}
+			r.RequesterID = user.UserID
+			if err := g.authorize(ctx, user, r.Category, true); err != nil {
+				return nil, err
+			}
+		}
 		return g.engine.Deanonymize(ctx, &model.DeanonymizeRequest{
 			TenantID:      r.TenantID,
 			Category:      r.Category,
@@ -235,6 +263,13 @@ func (g *GRPCServer) applyPermissions(ctx context.Context, dec func(any) error, 
 	}
 	handler := func(ctx context.Context, req any) (any, error) {
 		r := req.(*grpcApplyPermissionsRequest)
+		user, err := g.caller(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if user != nil {
+			r.User = userCtxFromAuth(user, r.User) // tenant and user ID come from the token
+		}
 		if g.processor == nil {
 			return nil, errPhase2NotConfigured
 		}
@@ -260,6 +295,13 @@ func (g *GRPCServer) resolveTokens(ctx context.Context, dec func(any) error, int
 	}
 	handler := func(ctx context.Context, req any) (any, error) {
 		r := req.(*grpcResolveTokensRequest)
+		user, err := g.caller(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if user != nil {
+			r.User = userCtxFromAuth(user, r.User)
+		}
 		if g.processor == nil {
 			return nil, errPhase2NotConfigured
 		}
@@ -282,6 +324,13 @@ func (g *GRPCServer) detectInference(ctx context.Context, dec func(any) error, i
 	}
 	handler := func(ctx context.Context, req any) (any, error) {
 		r := req.(*grpcVerifyAccessRequest)
+		user, err := g.caller(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if user != nil {
+			r.User = userCtxFromAuth(user, r.User)
+		}
 		if g.processor == nil {
 			return nil, errPhase2NotConfigured
 		}

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -148,6 +149,63 @@ type blacklistReader interface {
 	Get(ctx context.Context, key string) (string, error)
 }
 
+// Errors returned by authenticateToken. HTTP and gRPC map them to their own status codes.
+var (
+	errInvalidToken          = errors.New("invalid or expired token")
+	errMalformedClaims       = errors.New("malformed token claims")
+	errTokenRevoked          = errors.New("token has been revoked")
+	errRevocationUnavailable = errors.New("token revocation check unavailable")
+)
+
+// devUser is the identity injected when auth.skip_auth is on (development only).
+func devUser() *model.User {
+	return &model.User{UserID: "dev", Department: "marketing", Role: "manager", TenantID: "default"}
+}
+
+// authenticateToken validates a Bearer JWT (HMAC signature, issuer, expiry), checks the
+// revocation list, and returns the caller's identity. It is shared by REST and gRPC.
+func authenticateToken(ctx context.Context, cfg *config.Config, bl blacklistReader, tokenStr string) (*model.User, error) {
+	secret := []byte(cfg.Auth.JWTSecret)
+	token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (interface{}, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, jwt.ErrSignatureInvalid
+		}
+		return secret, nil
+	}, jwt.WithIssuer(cfg.Auth.Issuer), jwt.WithExpirationRequired())
+	if err != nil || !token.Valid {
+		return nil, errInvalidToken
+	}
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return nil, errMalformedClaims
+	}
+
+	// Check Redis blacklist for the jti claim (if Redis is configured).
+	// This enables immediate revocation without waiting for the token to expire.
+	if bl != nil {
+		if jti := claimString(claims, "jti"); jti != "" {
+			val, berr := bl.Get(ctx, jtiBlacklistKey(jti))
+			if berr != nil {
+				log.Printf("auth: blacklist check failed for jti=%q: %v", jti, berr)
+				if !cfg.Auth.RevocationFailOpen {
+					// Fail closed: a Redis outage must not re-enable revoked tokens.
+					return nil, errRevocationUnavailable
+				}
+			} else if val != "" {
+				return nil, errTokenRevoked
+			}
+		}
+	}
+
+	return &model.User{
+		UserID:     claimString(claims, "sub"),
+		Department: claimString(claims, "dept"),
+		Role:       claimString(claims, "role"),
+		TenantID:   claimString(claims, "tenant"),
+	}, nil
+}
+
 func authMiddlewareWith(cfg *config.Config, bl blacklistReader) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -159,13 +217,7 @@ func authMiddlewareWith(cfg *config.Config, bl blacklistReader) func(http.Handle
 
 			// Dev-mode bypass.
 			if cfg.Auth.SkipAuth {
-				devUser := &model.User{
-					UserID:     "dev",
-					Department: "marketing",
-					Role:       "manager",
-					TenantID:   "default",
-				}
-				ctx := context.WithValue(r.Context(), model.UserContextKey, devUser)
+				ctx := context.WithValue(r.Context(), model.UserContextKey, devUser())
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
@@ -176,52 +228,15 @@ func authMiddlewareWith(cfg *config.Config, bl blacklistReader) func(http.Handle
 				jsonError(w, "missing or invalid Authorization header", http.StatusUnauthorized)
 				return
 			}
-			tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
 
-			// Parse and validate JWT.
-			secret := []byte(cfg.Auth.JWTSecret)
-			token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (interface{}, error) {
-				if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-					return nil, jwt.ErrSignatureInvalid
+			user, err := authenticateToken(r.Context(), cfg, bl, strings.TrimPrefix(authHeader, "Bearer "))
+			if err != nil {
+				status := http.StatusUnauthorized
+				if errors.Is(err, errRevocationUnavailable) {
+					status = http.StatusServiceUnavailable
 				}
-				return secret, nil
-			}, jwt.WithIssuer(cfg.Auth.Issuer), jwt.WithExpirationRequired())
-			if err != nil || !token.Valid {
-				jsonError(w, "invalid or expired token", http.StatusUnauthorized)
+				jsonError(w, err.Error(), status)
 				return
-			}
-
-			claims, ok := token.Claims.(jwt.MapClaims)
-			if !ok {
-				jsonError(w, "malformed token claims", http.StatusUnauthorized)
-				return
-			}
-
-			// Check Redis blacklist for the jti claim (if Redis is configured).
-			// This enables immediate revocation without waiting for the token to expire.
-			if bl != nil {
-				jti := claimString(claims, "jti")
-				if jti != "" {
-					val, berr := bl.Get(r.Context(), jtiBlacklistKey(jti))
-					if berr != nil {
-						log.Printf("auth: blacklist check failed for jti=%q: %v", jti, berr)
-						if !cfg.Auth.RevocationFailOpen {
-							// Fail closed: a Redis outage must not re-enable revoked tokens.
-							jsonError(w, "token revocation check unavailable", http.StatusServiceUnavailable)
-							return
-						}
-					} else if val != "" {
-						jsonError(w, "token has been revoked", http.StatusUnauthorized)
-						return
-					}
-				}
-			}
-
-			user := &model.User{
-				UserID:     claimString(claims, "sub"),
-				Department: claimString(claims, "dept"),
-				Role:       claimString(claims, "role"),
-				TenantID:   claimString(claims, "tenant"),
 			}
 
 			ctx := context.WithValue(r.Context(), model.UserContextKey, user)

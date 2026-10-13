@@ -190,8 +190,10 @@ func newServerCmd() *cobra.Command {
 			}()
 
 			// Start gRPC server in background goroutine.
-			grpcSrv := grpc.NewServer()
 			grpcImpl := server.NewGRPCServer(eng, cls, kv, aud, processor)
+			// Same authentication, tenant binding and access policy as the REST API.
+			grpcImpl.EnableAuth(cfg, ctrl, redisClient)
+			grpcSrv := grpc.NewServer(grpc.UnaryInterceptor(grpcImpl.UnaryInterceptor()))
 			grpcImpl.Register(grpcSrv)
 
 			grpcLis, err := net.Listen("tcp", grpcAddr)
