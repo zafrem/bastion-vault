@@ -12,6 +12,7 @@ services:
     environment:
       VAULT_KMS_LOCAL_MASTER_KEY: "${VAULT_MASTER_KEY}"
       VAULT_KMS_PROVIDER: local
+      VAULT_AUTH_JWT_SECRET: "${VAULT_AUTH_JWT_SECRET:?set VAULT_AUTH_JWT_SECRET (>= 32 bytes, e.g. openssl rand -hex 32)}"
       VAULT_DATABASE_DSN: "postgres://vault:vault@postgres:5432/bastion_vault?sslmode=disable"
       VAULT_CACHE_ADDRESS: "redis://redis:6379"
       VAULT_OPA_BUNDLE_SERVER: "http://opa:8181"

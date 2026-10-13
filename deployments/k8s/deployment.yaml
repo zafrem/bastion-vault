@@ -41,6 +41,11 @@ spec:
                 secretKeyRef:
                   name: bastion-vault-secrets
                   key: master-key
+            - name: VAULT_AUTH_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: bastion-vault-secrets
+                  key: jwt-secret
             - name: VAULT_DATABASE_DSN
               valueFrom:
                 secretKeyRef:

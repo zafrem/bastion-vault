@@ -154,17 +154,29 @@ Master Key (KEK) — stored in KMS provider
 export VAULT_KMS_LOCAL_MASTER_KEY=$(openssl rand -hex 32)
 ```
 
-### 2. Run the server locally
+### 2. Set a JWT secret
+
+Vault refuses to start with an empty, placeholder (`change-me-in-production`) or short (< 32 bytes) `auth.jwt_secret`:
+
+```bash
+export VAULT_AUTH_JWT_SECRET=$(openssl rand -hex 32)
+```
+
+For local development only, `auth.skip_auth: true` disables token checks entirely.
+
+### 3. Run the server locally
 
 ```bash
 go run ./cmd/vault server
 # Listening on http://0.0.0.0:8080
 ```
 
-### 3. Run with Docker Compose
+Token revocation fails closed: if the Redis revocation list can't be queried, requests get `503`. Set `auth.revocation_fail_open: true` to accept tokens in that case (not recommended).
+
+### 4. Run with Docker Compose
 
 ```bash
-VAULT_MASTER_KEY=$(openssl rand -hex 32) docker compose -f deployments/docker-compose.yml up -d
+VAULT_MASTER_KEY=$(openssl rand -hex 32) VAULT_AUTH_JWT_SECRET=$(openssl rand -hex 32) docker compose -f deployments/docker-compose.yml up -d
 ```
 
 ---
