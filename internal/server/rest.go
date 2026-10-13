@@ -105,7 +105,7 @@ func (s *Server) Router() http.Handler {
 		r.Use(rateLimitMiddleware(s.cfg.RateLimit.RPS, s.cfg.RateLimit.Burst))
 	}
 	r.Use(authMiddleware(s.cfg, s.redisClient))
-	r.Use(tenantMiddleware)
+	r.Use(s.tenantMiddleware)
 
 	r.Get("/v1/health/live", s.handleLive)
 	r.Get("/v1/health/ready", s.handleReady)

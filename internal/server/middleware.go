@@ -257,18 +257,6 @@ func claimString(claims jwt.MapClaims, key string) string {
 
 type tenantCtxKey struct{}
 
-// tenantMiddleware extracts X-Tenant-ID and injects it into the request context.
-func tenantMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		tenantID := r.Header.Get("X-Tenant-ID")
-		if tenantID == "" {
-			tenantID = "default"
-		}
-		ctx := context.WithValue(r.Context(), tenantCtxKey{}, tenantID)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
-}
-
 func tenantFromCtx(ctx context.Context) string {
 	if id, ok := ctx.Value(tenantCtxKey{}).(string); ok {
 		return id

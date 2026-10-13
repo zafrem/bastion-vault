@@ -267,7 +267,9 @@ vault access --department marketing --role analyst --category DC-01
 
 Base URL: `http://localhost:8080`
 
-All endpoints (except health/metrics) require `Authorization: Bearer <token>` and optionally `X-Tenant-ID: <tenant>`.
+All endpoints (except health/metrics) require `Authorization: Bearer <token>`.
+
+**Tenant.** The tenant is the one the token was issued for (its `tenant` claim; `default` if the claim is absent). `X-Tenant-ID` is optional and can only restate it: a header naming a different tenant is rejected with `403 cross-tenant access denied` and reported as a `cross_tenant_attempt` event. A `tenant_id` in the request body is checked the same way. With `auth.skip_auth` (development only) no token is verified, so the header selects the tenant.
 
 ### Anonymize
 
