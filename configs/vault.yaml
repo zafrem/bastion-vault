@@ -54,10 +54,11 @@ log:
   format: json             # json | text
 
 auth:
-  jwt_secret: "change-me-in-production"
+  jwt_secret: ""            # REQUIRED (>=32 bytes) unless skip_auth: set VAULT_AUTH_JWT_SECRET; the server refuses to start otherwise
   jwt_algorithm: HS256
   jwt_issuer: bastion
   skip_auth: false
+  revocation_fail_open: false  # true = accept tokens when the Redis revocation list is unreachable (not recommended)
 
 token_store:
   driver: memory            # memory | postgres | sqlite

@@ -125,6 +125,9 @@ func newServerCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if err := cfg.ValidateAuth(); err != nil {
+				return fmt.Errorf("refusing to start: %w", err)
+			}
 
 			mgr, provider, aud, err := loadDeps(cfg)
 			if err != nil {

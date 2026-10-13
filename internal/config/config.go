@@ -80,6 +80,34 @@ type AuthConfig struct {
 	JWTAlgorithm string `mapstructure:"jwt_algorithm"` // HS256 or RS256
 	Issuer       string `mapstructure:"jwt_issuer"`
 	SkipAuth     bool   `mapstructure:"skip_auth"` // dev mode only
+	// RevocationFailOpen lets requests through when the Redis revocation list
+	// cannot be queried. Default false (fail closed): a Redis outage must not
+	// re-enable revoked tokens.
+	RevocationFailOpen bool `mapstructure:"revocation_fail_open"`
+}
+
+// minJWTSecretLen is the minimum HMAC key length accepted (matches HS256's 256-bit key).
+const minJWTSecretLen = 32
+
+// insecureJWTSecrets are placeholder values that have shipped in example configs.
+var insecureJWTSecrets = map[string]bool{"change-me-in-production": true}
+
+// ValidateAuth refuses to start with a missing, placeholder or weak JWT secret.
+// It is skipped in dev mode (auth.skip_auth), where no tokens are verified.
+func (c *Config) ValidateAuth() error {
+	if c.Auth.SkipAuth {
+		return nil
+	}
+	s := c.Auth.JWTSecret
+	switch {
+	case s == "":
+		return fmt.Errorf("auth.jwt_secret is empty: set it in the config or via VAULT_AUTH_JWT_SECRET")
+	case insecureJWTSecrets[s]:
+		return fmt.Errorf("auth.jwt_secret is the published placeholder %q: set a unique secret (VAULT_AUTH_JWT_SECRET)", s)
+	case len(s) < minJWTSecretLen:
+		return fmt.Errorf("auth.jwt_secret is too short (%d bytes): use at least %d", len(s), minJWTSecretLen)
+	}
+	return nil
 }
 
 type ServerConfig struct {
@@ -159,10 +187,11 @@ func Load(cfgFile string) (*Config, error) {
 	v.SetDefault("server.http_port", 8080)
 	v.SetDefault("server.grpc_port", 9090)
 	v.SetDefault("server.host", "0.0.0.0")
-	v.SetDefault("auth.jwt_secret", "change-me-in-production")
+	v.SetDefault("auth.jwt_secret", "")
 	v.SetDefault("auth.jwt_algorithm", "HS256")
 	v.SetDefault("auth.jwt_issuer", "bastion")
 	v.SetDefault("auth.skip_auth", false)
+	v.SetDefault("auth.revocation_fail_open", false)
 	v.SetDefault("kms.provider", "local")
 	v.SetDefault("kms.dek_cache_ttl", 5*time.Minute)
 	v.SetDefault("kms.local.key_dir", "./keys")

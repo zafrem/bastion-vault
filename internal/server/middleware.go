@@ -135,11 +135,20 @@ func BlacklistJTI(ctx context.Context, redisClient *cache.Client, jti string, tt
 // If redisClient is non-nil, the middleware checks the JWT blacklist before
 // accepting a token (enables immediate revocation for break-glass and GDPR erasure).
 func authMiddleware(cfg *config.Config, redisClient ...*cache.Client) func(http.Handler) http.Handler {
-	var bl *cache.Client
-	if len(redisClient) > 0 {
+	var bl blacklistReader
+	// Avoid a typed-nil in the interface: only wire a blacklist when Redis is configured.
+	if len(redisClient) > 0 && redisClient[0] != nil {
 		bl = redisClient[0]
 	}
+	return authMiddlewareWith(cfg, bl)
+}
 
+// blacklistReader is the read side of the JWT revocation list.
+type blacklistReader interface {
+	Get(ctx context.Context, key string) (string, error)
+}
+
+func authMiddlewareWith(cfg *config.Config, bl blacklistReader) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Health-check and metrics endpoints are always public.
@@ -196,7 +205,11 @@ func authMiddleware(cfg *config.Config, redisClient ...*cache.Client) func(http.
 					val, berr := bl.Get(r.Context(), jtiBlacklistKey(jti))
 					if berr != nil {
 						log.Printf("auth: blacklist check failed for jti=%q: %v", jti, berr)
-						// Fail-open: do not block the request when Redis is temporarily unavailable.
+						if !cfg.Auth.RevocationFailOpen {
+							// Fail closed: a Redis outage must not re-enable revoked tokens.
+							jsonError(w, "token revocation check unavailable", http.StatusServiceUnavailable)
+							return
+						}
 					} else if val != "" {
 						jsonError(w, "token has been revoked", http.StatusUnauthorized)
 						return
