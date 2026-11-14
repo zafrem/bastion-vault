@@ -179,6 +179,9 @@ func (g *GRPCServer) classifyData(ctx context.Context, dec func(any) error, inte
 		return nil, err
 	}
 	handler := func(ctx context.Context, req any) (any, error) {
+		if _, err := g.caller(ctx); err != nil {
+			return nil, err
+		}
 		r := req.(*grpcClassifyRequest)
 		return g.classifier.Classify(r.Records), nil
 	}
@@ -194,6 +197,9 @@ func (g *GRPCServer) detectPII(ctx context.Context, dec func(any) error, interce
 		return nil, err
 	}
 	handler := func(ctx context.Context, req any) (any, error) {
+		if _, err := g.caller(ctx); err != nil {
+			return nil, err
+		}
 		r := req.(*grpcDetectPIIRequest)
 		detections := g.classifier.DetectPII(r.Record)
 		return map[string]any{"detections": detections, "count": len(detections)}, nil
@@ -210,6 +216,9 @@ func (g *GRPCServer) validateKAnon(ctx context.Context, dec func(any) error, int
 		return nil, err
 	}
 	handler := func(ctx context.Context, req any) (any, error) {
+		if _, err := g.caller(ctx); err != nil {
+			return nil, err
+		}
 		r := req.(*grpcValidateKAnonRequest)
 		if r.RequiredK == 0 {
 			r.RequiredK = 5
