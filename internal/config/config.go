@@ -116,6 +116,14 @@ type ServerConfig struct {
 	Host     string `mapstructure:"host"`
 	TLSCert  string `mapstructure:"tls_cert"`
 	TLSKey   string `mapstructure:"tls_key"`
+
+	// gRPC TLS. Set grpc_tls_cert and grpc_tls_key (PEM files) to serve gRPC over TLS; the files are
+	// re-read when they change, so rotation needs no restart. grpc_tls_client_ca additionally requires
+	// clients to present a certificate signed by it (mutual TLS). All empty = plaintext.
+	// (tls_cert / tls_key above are not used by the gRPC server.)
+	GRPCTLSCert     string `mapstructure:"grpc_tls_cert"`
+	GRPCTLSKey      string `mapstructure:"grpc_tls_key"`
+	GRPCTLSClientCA string `mapstructure:"grpc_tls_client_ca"`
 }
 
 type KMSConfig struct {
@@ -186,6 +194,9 @@ func Load(cfgFile string) (*Config, error) {
 
 	v.SetDefault("server.http_port", 8080)
 	v.SetDefault("server.grpc_port", 9090)
+	v.SetDefault("server.grpc_tls_cert", "")
+	v.SetDefault("server.grpc_tls_key", "")
+	v.SetDefault("server.grpc_tls_client_ca", "")
 	v.SetDefault("server.host", "0.0.0.0")
 	v.SetDefault("auth.jwt_secret", "")
 	v.SetDefault("auth.jwt_algorithm", "HS256")

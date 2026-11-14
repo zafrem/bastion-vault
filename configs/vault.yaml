@@ -4,6 +4,10 @@ server:
   host: "0.0.0.0"
   tls_cert: ""
   tls_key: ""
+  # gRPC TLS (PEM files, re-read on change so rotation needs no restart). Leave empty for plaintext.
+  grpc_tls_cert: ""
+  grpc_tls_key: ""
+  grpc_tls_client_ca: ""     # set to require client certificates (mutual TLS)
 
 kms:
   provider: local          # local | aws | vault

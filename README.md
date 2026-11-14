@@ -166,6 +166,8 @@ For local development only, `auth.skip_auth: true` disables token checks entirel
 
 The gRPC API is authenticated the same way as REST: send the JWT as `authorization: Bearer <token>` call metadata (only `Health` is public). The tenant and caller identity come from the token (`tenant` and `sub` claims), not from the request body. A request that names a different `tenant_id` fails with `PermissionDenied`, and the same RBAC/OPA decision applies as for REST. Revoked tokens fail with `Unauthenticated`, and, as for REST, a revocation-list outage fails closed (`Unavailable`).
 
+**gRPC TLS.** The gRPC port is plaintext until you set `server.grpc_tls_cert` and `server.grpc_tls_key` (PEM files). Add `server.grpc_tls_client_ca` to require client certificates (mutual TLS). A half-set, unreadable or mismatched configuration makes Vault refuse to start. The files are re-read when they change, so rotation needs no restart, and a bad replacement keeps the working certificate. With JWT auth on and no TLS, Vault logs a warning that the token travels unencrypted. (`server.tls_cert` / `server.tls_key` are not used by the gRPC server; these settings do not cover the REST port.)
+
 ### 3. Run the server locally
 
 ```bash
@@ -499,6 +501,9 @@ Key settings:
 |---|---|---|---|
 | `server.http_port` | `VAULT_SERVER_HTTP_PORT` | `8080` | REST listen port |
 | `server.grpc_port` | `VAULT_SERVER_GRPC_PORT` | `9090` | gRPC listen port |
+| `server.grpc_tls_cert` | `VAULT_SERVER_GRPC_TLS_CERT` | — | PEM certificate: serve gRPC over TLS (with `grpc_tls_key`) |
+| `server.grpc_tls_key` | `VAULT_SERVER_GRPC_TLS_KEY` | — | PEM private key for the certificate above |
+| `server.grpc_tls_client_ca` | `VAULT_SERVER_GRPC_TLS_CLIENT_CA` | — | PEM CA bundle: require client certificates (mutual TLS) |
 | `kms.provider` | `VAULT_KMS_PROVIDER` | `local` | `local` / `aws` / `vault` |
 | `kms.local.master_key` | `VAULT_KMS_LOCAL_MASTER_KEY` | — | 32-byte hex AES-256 key (required) |
 | `kms.dek_cache_ttl` | `VAULT_KMS_DEK_CACHE_TTL` | `5m` | DEK cache TTL |

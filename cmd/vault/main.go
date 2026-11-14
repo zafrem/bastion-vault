@@ -193,7 +193,20 @@ func newServerCmd() *cobra.Command {
 			grpcImpl := server.NewGRPCServer(eng, cls, kv, aud, processor)
 			// Same authentication, tenant binding and access policy as the REST API.
 			grpcImpl.EnableAuth(cfg, ctrl, redisClient)
-			grpcSrv := grpc.NewServer(grpc.UnaryInterceptor(grpcImpl.UnaryInterceptor()))
+			grpcOpts := []grpc.ServerOption{grpc.UnaryInterceptor(grpcImpl.UnaryInterceptor())}
+			tlsCreds, err := server.TLSCredentials(cfg.Server.GRPCTLSCert, cfg.Server.GRPCTLSKey, cfg.Server.GRPCTLSClientCA)
+			if err != nil {
+				return fmt.Errorf("gRPC TLS: %w", err)
+			}
+			switch {
+			case tlsCreds != nil:
+				grpcOpts = append(grpcOpts, grpc.Creds(tlsCreds))
+				log.Printf("gRPC TLS enabled (mutual TLS: %v)", cfg.Server.GRPCTLSClientCA != "")
+			case !cfg.Auth.SkipAuth:
+				log.Printf("WARNING: gRPC is plaintext but requires a JWT: the token travels unencrypted; " +
+					"set server.grpc_tls_cert and server.grpc_tls_key, or terminate TLS in front of the gRPC port")
+			}
+			grpcSrv := grpc.NewServer(grpcOpts...)
 			grpcImpl.Register(grpcSrv)
 
 			grpcLis, err := net.Listen("tcp", grpcAddr)
