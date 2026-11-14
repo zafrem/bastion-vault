@@ -36,3 +36,7 @@ go.work.sum
 
 # Compiled binaries (reproducible via `go build`)
 bin/
+
+# Runtime audit logs and local keys
+audit-logs/
+keys/
