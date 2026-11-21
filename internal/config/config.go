@@ -207,6 +207,8 @@ type LogConfig struct {
 func Load(cfgFile string) (*Config, error) {
 	v := viper.New()
 
+	// Registered so VAULT_CACHE_PASSWORD works without the key appearing in the YAML file.
+	v.SetDefault("cache.password", "")
 	v.SetDefault("exceptions.public_key", "")
 	v.SetDefault("exceptions.file", "")
 	v.SetDefault("user_notice.detail", "category")

@@ -36,7 +36,7 @@ database:
 
 cache:
   address: "redis://localhost:6379"
-  password: ""
+  # password: set VAULT_CACHE_PASSWORD (do not commit a password here)
   db: 0
   ttl: 1h
 
