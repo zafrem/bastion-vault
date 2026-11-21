@@ -1,5 +1,5 @@
 # Stage 1: Build
-FROM golang:1.21-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
 RUN apk add --no-cache git ca-certificates
 
@@ -21,6 +21,9 @@ COPY --from=builder /bin/vault /bin/vault
 
 COPY configs/vault.yaml /etc/vault/vault.yaml
 COPY policies/ /etc/vault/policies/
+
+# Numeric IDs: scratch has no passwd file to resolve names against.
+USER 65532:65532
 
 EXPOSE 8080 9090
 
