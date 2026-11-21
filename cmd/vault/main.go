@@ -26,6 +26,7 @@ import (
 	"github.com/zafrem/bastion-vault/internal/cache"
 	"github.com/zafrem/bastion-vault/internal/classification"
 	"github.com/zafrem/bastion-vault/internal/config"
+	"github.com/zafrem/bastion-vault/internal/exceptions"
 	"github.com/zafrem/bastion-vault/internal/kanon"
 	"github.com/zafrem/bastion-vault/internal/kms"
 	"github.com/zafrem/bastion-vault/internal/model"
@@ -151,6 +152,26 @@ func newServerCmd() *cobra.Command {
 			defer stopErasure()
 
 			eng := anonymizer.NewEngine(mgr, cls, aud, store)
+			eng.SetNoticeDetail(cfg.UserNotice.Detail)
+
+			// Scoped exceptions: verified against Tracker's public key and kept in a
+			// local file, so Vault enforces from its own copy and keeps working with
+			// Tracker or NATS down. Without a key the feature is off.
+			excFile := cfg.Exceptions.File
+			if excFile == "" && cfg.Exceptions.PublicKey != "" {
+				excFile = "vault-exceptions.json"
+			}
+			excClient, err := exceptions.NewClient("vault", cfg.Exceptions.PublicKey, excFile)
+			if err != nil {
+				return fmt.Errorf("exceptions: %w", err)
+			}
+			if excClient.Enabled() {
+				eng.SetExceptions(excClient)
+				excClient.Start(cfg.Events.NATSUrl, 30*time.Second)
+				defer excClient.Close()
+				log.Printf("scoped exceptions enabled (file %s)", excFile)
+			}
+
 			ctrl := access.NewController(cfg.OPA.BundleServer)
 			kv := kanon.New()
 			bg := breakglass.NewManager(aud)

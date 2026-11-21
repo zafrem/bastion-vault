@@ -158,6 +158,10 @@ type AnonymizeResponse struct {
 	Records   []map[string]any `json:"records"`
 	AuditID   string           `json:"audit_id"`
 	Metadata  AnonymizeMetadata `json:"metadata"`
+	// Notice is the end-user-safe explanation that data was masked.
+	Notice *UserNotice `json:"user_notice,omitempty"`
+	// ExceptionsApplied lists IDs of exceptions that exempted a field from masking.
+	ExceptionsApplied []string `json:"exceptions_applied,omitempty"`
 }
 
 // AnonymizeMetadata contains statistics about the anonymization run

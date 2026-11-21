@@ -25,6 +25,21 @@ type Config struct {
 	Events         EventsConfig         `mapstructure:"events"`
 	CloudLLM       CloudLLMConfig       `mapstructure:"cloud_llm"`
 	Classification ClassificationConfig `mapstructure:"classification"`
+	UserNotice     UserNoticeConfig     `mapstructure:"user_notice"`
+	Exceptions     ExceptionsConfig     `mapstructure:"exceptions"`
+}
+
+// UserNoticeConfig controls the explanation shown to end users when data is masked.
+type UserNoticeConfig struct {
+	Detail string `mapstructure:"detail"` // "category" (default) or "minimal"
+}
+
+// ExceptionsConfig enables scoped exemptions signed by Tracker. Off unless a
+// public key is set; Vault then enforces from its own persisted copy even when
+// Tracker or NATS is unreachable. Env: VAULT_EXCEPTIONS_PUBLIC_KEY.
+type ExceptionsConfig struct {
+	PublicKey string `mapstructure:"public_key"`
+	File      string `mapstructure:"file"`
 }
 
 // ClassificationConfig holds overrides for the PII value-pattern fallback set
@@ -192,6 +207,9 @@ type LogConfig struct {
 func Load(cfgFile string) (*Config, error) {
 	v := viper.New()
 
+	v.SetDefault("exceptions.public_key", "")
+	v.SetDefault("exceptions.file", "")
+	v.SetDefault("user_notice.detail", "category")
 	v.SetDefault("server.http_port", 8080)
 	v.SetDefault("server.grpc_port", 9090)
 	v.SetDefault("server.grpc_tls_cert", "")

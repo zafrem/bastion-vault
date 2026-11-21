@@ -9,6 +9,7 @@ import (
 	"github.com/zafrem/bastion-vault/internal/anonymizer/strategies"
 	"github.com/zafrem/bastion-vault/internal/audit"
 	"github.com/zafrem/bastion-vault/internal/classification"
+	"github.com/zafrem/bastion-vault/internal/exceptions"
 	"github.com/zafrem/bastion-vault/internal/kms"
 	"github.com/zafrem/bastion-vault/internal/model"
 	"github.com/zafrem/bastion-vault/internal/tokendb"
@@ -16,8 +17,8 @@ import (
 
 // fieldPolicy describes which strategy to apply to a PII field
 type fieldPolicy struct {
-	piiType    model.PIIType
-	strategy   model.AnonymizationStrategy
+	piiType       model.PIIType
+	strategy      model.AnonymizationStrategy
 	maskForSearch bool // when true, a separate search token is also produced
 }
 
@@ -51,11 +52,19 @@ var categoryPolicies = map[model.DataCategory][]fieldPolicy{
 
 // Engine applies Phase-1 (strategy selection) and Phase-2 (transformation) anonymization.
 type Engine struct {
-	kmsManager *kms.Manager
-	classifier *classification.Classifier
-	auditor    *audit.Logger
-	strategyMap map[model.AnonymizationStrategy]strategies.Strategy
+	kmsManager   *kms.Manager
+	classifier   *classification.Classifier
+	auditor      *audit.Logger
+	strategyMap  map[model.AnonymizationStrategy]strategies.Strategy
+	exc          *exceptions.Client // optional; nil = every policy is enforced
+	noticeDetail string
 }
+
+// SetExceptions installs the scoped-exception store. Without one, nothing is exempted.
+func (e *Engine) SetExceptions(c *exceptions.Client) { e.exc = c }
+
+// SetNoticeDetail sets how specific the end-user notice is ("category" or "minimal").
+func (e *Engine) SetNoticeDetail(d string) { e.noticeDetail = d }
 
 // NewEngine wires up the anonymization engine with all required dependencies.
 // store may be nil; when provided, deterministic tokenization persists reverse-lookup
@@ -89,6 +98,19 @@ func (e *Engine) Anonymize(ctx context.Context, req *model.AnonymizeRequest) (*m
 	policies := categoryPolicies[req.Category]
 	detections := e.buildDetectionIndex(req.Records, policies)
 
+	// A scoped, signed exception (rule "vault.mask:<pii_type>") leaves a field
+	// unmasked for one tenant. It is recorded only when a field of that type was
+	// actually present, so the audit trail shows real use.
+	var applied []string
+	if e.exc != nil {
+		for field, pol := range detections {
+			if id, ok := e.exc.Allowed("vault.mask:"+string(pol.piiType), req.TenantID, req.RequesterID); ok {
+				delete(detections, field)
+				applied = appendUnique(applied, id)
+			}
+		}
+	}
+
 	hmacKey, encKey, err := e.resolveKeyMaterial(ctx, req.TenantID, req.Category)
 	if err != nil {
 		return nil, fmt.Errorf("anonymize: key material: %w", err)
@@ -121,18 +143,30 @@ func (e *Engine) Anonymize(ctx context.Context, req *model.AnonymizeRequest) (*m
 		Action:       "anonymize",
 		Outcome:      "success",
 		Metadata: map[string]any{
-			"record_count": meta.RecordCount,
-			"purpose":      req.Purpose,
+			"record_count":       meta.RecordCount,
+			"purpose":            req.Purpose,
+			"exceptions_applied": applied,
 		},
 	})
 
 	return &model.AnonymizeResponse{
-		TenantID: req.TenantID,
-		Category: req.Category,
-		Records:  output,
-		AuditID:  auditID,
-		Metadata: meta,
+		TenantID:          req.TenantID,
+		Category:          req.Category,
+		Records:           output,
+		AuditID:           auditID,
+		Metadata:          meta,
+		Notice:            model.NewMaskedNotice(e.noticeDetail, auditID, meta.FieldsAnonymized),
+		ExceptionsApplied: applied,
 	}, nil
+}
+
+func appendUnique(list []string, s string) []string {
+	for _, x := range list {
+		if x == s {
+			return list
+		}
+	}
+	return append(list, s)
 }
 
 // Deanonymize reverses reversible fields for authorised callers.
