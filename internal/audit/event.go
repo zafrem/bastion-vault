@@ -43,7 +43,7 @@ func newLoggerWithKey(outputDir string, signingEnabled bool, signingKey []byte) 
 		return nil, fmt.Errorf("audit: creating output dir: %w", err)
 	}
 	filename := filepath.Join(outputDir, "audit-"+todayStr()+".jsonl")
-	f, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	f, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) // #nosec G304 -- path comes from operator config or CLI, not request input
 	if err != nil {
 		return nil, fmt.Errorf("audit: opening log file: %w", err)
 	}
@@ -138,7 +138,7 @@ func (l *Logger) Query(_ context.Context, tenantID string, limit int, since time
 	filename := l.file.Name()
 	l.mu.Unlock()
 
-	f, err := os.Open(filename)
+	f, err := os.Open(filename) // #nosec G304 -- path comes from operator config or CLI, not request input
 	if err != nil {
 		return nil, fmt.Errorf("audit: opening log for query: %w", err)
 	}

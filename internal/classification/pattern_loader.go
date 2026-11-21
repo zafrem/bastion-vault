@@ -36,7 +36,7 @@ func LoadPatternsFromDir(regexRoot string) map[model.PIIType][]*regexp.Regexp {
 	out := make(map[model.PIIType][]*regexp.Regexp)
 	files, _ := filepath.Glob(filepath.Join(regexRoot, "pii", "kr", "*.yml"))
 	for _, f := range files {
-		data, err := os.ReadFile(f)
+		data, err := os.ReadFile(f) // #nosec G304 -- path comes from operator config or CLI, not request input
 		if err != nil {
 			continue
 		}

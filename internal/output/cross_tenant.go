@@ -41,7 +41,7 @@ func (v *CrossTenantVerifier) Verify(_ context.Context, records []model.DataReco
 			continue
 		}
 		mismatched++
-		log.Printf("CRITICAL vault-out cross_tenant_violation: record_id=%s record_tenant=%s user_tenant=%s",
+		log.Printf("CRITICAL vault-out cross_tenant_violation: record_id=%q record_tenant=%q user_tenant=%q",
 			rec.RecordID, rec.TenantID, userTenantID)
 	}
 

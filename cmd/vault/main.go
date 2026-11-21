@@ -643,7 +643,7 @@ func readAll(r interface{ Read(p []byte) (int, error) }) ([]byte, error) {
 
 // readJSONL reads newline-delimited JSON objects from a file.
 func readJSONL(path string) ([]map[string]any, error) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) // #nosec G304 -- path comes from operator config or CLI, not request input
 	if err != nil {
 		return nil, fmt.Errorf("opening %s: %w", path, err)
 	}
