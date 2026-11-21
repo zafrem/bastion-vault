@@ -336,6 +336,10 @@ type PermissionResponse struct {
 	Decisions        PermissionDecisions `json:"decisions"`
 	Audit            []FieldDisclosure   `json:"audit"`
 	ProcessingTimeMs int64               `json:"processing_time_ms"`
+	// Notice is the end-user-safe explanation that fields were masked.
+	Notice *UserNotice `json:"user_notice,omitempty"`
+	// ExceptionsApplied lists IDs of exceptions that exempted a field from masking.
+	ExceptionsApplied []string `json:"exceptions_applied,omitempty"`
 }
 
 // PermissionDecisions summarises what happened to the record set during Phase 2.
@@ -355,6 +359,8 @@ type FieldDisclosure struct {
 	OriginalState string `json:"original_state"`
 	FinalState    string `json:"final_state"`
 	Reason        string `json:"reason"`
+	// ExceptionID is set when a scoped exception exempted this field.
+	ExceptionID string `json:"exception_id,omitempty"`
 }
 
 // InferenceRisk is the output of the inference attack detector.

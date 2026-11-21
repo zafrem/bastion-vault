@@ -2,7 +2,6 @@ package exceptions
 
 import (
 	"crypto/ed25519"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,7 +25,7 @@ import (
 // module). Either way an envelope is only trusted if its signature verifies.
 type Client struct {
 	module string
-	pub    ed25519.PublicKey
+	pubs   []ed25519.PublicKey
 	path   string
 
 	mu   sync.RWMutex
@@ -40,19 +39,20 @@ type Client struct {
 	onChange func()
 }
 
-// NewClient creates a Client for module. pubKeyB64 is the base64 Ed25519
-// public key published by Tracker; empty disables the feature. path is where
-// signed envelopes are persisted ("" keeps them in memory only).
-func NewClient(module, pubKeyB64, path string) (*Client, error) {
+// NewClient creates a Client for module. pubKeys is the base64 Ed25519 public
+// key published by Tracker, or a comma-separated list while a key is being
+// rotated; empty disables the feature. path is where signed envelopes are
+// persisted ("" keeps them in memory only).
+func NewClient(module, pubKeys, path string) (*Client, error) {
 	c := &Client{module: module, path: path, byID: map[string]Exception{}, stop: make(chan struct{})}
-	if pubKeyB64 == "" {
+	keys, err := ParsePublicKeys(pubKeys)
+	if err != nil {
+		return nil, err
+	}
+	if len(keys) == 0 {
 		return c, nil
 	}
-	raw, err := base64.StdEncoding.DecodeString(pubKeyB64)
-	if err != nil || len(raw) != ed25519.PublicKeySize {
-		return nil, errors.New("exceptions: public key must be a base64 Ed25519 public key")
-	}
-	c.pub = ed25519.PublicKey(raw)
+	c.pubs = keys
 	c.loadFile()
 	return c, nil
 }
@@ -75,7 +75,7 @@ func (c *Client) notifyChange() {
 }
 
 // Enabled reports whether a public key is configured.
-func (c *Client) Enabled() bool { return c != nil && len(c.pub) > 0 }
+func (c *Client) Enabled() bool { return c != nil && len(c.pubs) > 0 }
 
 // Allowed reports whether an active exception exempts rule for this caller,
 // returning its ID so the caller can record which exception was used.
@@ -115,7 +115,7 @@ func (c *Client) Apply(env Envelope) error {
 	if !c.Enabled() {
 		return errors.New("exceptions: disabled (no public key)")
 	}
-	p, err := Verify(c.pub, env)
+	p, err := Verify(c.pubs, env)
 	if err != nil {
 		return err
 	}
@@ -234,7 +234,7 @@ func (c *Client) loadFile() {
 	c.mu.Lock()
 	changed := false
 	for _, env := range envs {
-		p, err := Verify(c.pub, env)
+		p, err := Verify(c.pubs, env)
 		if err != nil {
 			log.Printf("[exceptions] ignoring envelope in %s: %v", c.path, err)
 			continue

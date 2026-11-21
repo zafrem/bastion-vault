@@ -7,6 +7,7 @@ import (
 
 	"github.com/zafrem/bastion-vault/internal/access"
 	"github.com/zafrem/bastion-vault/internal/audit"
+	"github.com/zafrem/bastion-vault/internal/exceptions"
 	"github.com/zafrem/bastion-vault/internal/kanon"
 	"github.com/zafrem/bastion-vault/internal/kms"
 	"github.com/zafrem/bastion-vault/internal/model"
@@ -24,15 +25,16 @@ var categoryKThreshold = map[model.DataCategory]int{
 // each call constructs its own working slice and the underlying components are
 // either stateless or use sync.Map for their internal caches.
 type Processor struct {
-	resolver    *PermissionResolver
-	generator   *ViewGenerator
-	tokenRes    *TokenResolver
-	inferDet    *InferenceDetector
-	aggregator  *Aggregator
-	crossTenant *CrossTenantVerifier
-	kanon       *kanon.Validator
-	access      *access.Controller
-	audit       *audit.Logger
+	resolver     *PermissionResolver
+	generator    *ViewGenerator
+	tokenRes     *TokenResolver
+	inferDet     *InferenceDetector
+	aggregator   *Aggregator
+	crossTenant  *CrossTenantVerifier
+	kanon        *kanon.Validator
+	access       *access.Controller
+	audit        *audit.Logger
+	noticeDetail string
 }
 
 // NewProcessor constructs the Phase 2 processor with all collaborators initialised.
@@ -190,6 +192,7 @@ func (p *Processor) process(ctx context.Context, req ProcessRequest, resolveToke
 	}
 	resp.FilteredRecords = views
 	resp.Audit = disclosures
+	resp.ExceptionsApplied, resp.Notice = p.summarise(disclosures, resp.RequestID)
 	resp.Decisions.AccessLevelApplied = string(level)
 	resp.Decisions.Returned = len(views)
 
@@ -313,16 +316,16 @@ func (p *Processor) logDecision(ctx context.Context, req ProcessRequest, resp *m
 		Action:       "vault_out_process",
 		Outcome:      outcome,
 		Metadata: map[string]any{
-			"request_id":          req.RequestID,
-			"status":              resp.Status,
-			"records_in":          resp.Decisions.TotalInput,
-			"records_returned":    resp.Decisions.Returned,
-			"records_filtered":    resp.Decisions.FilteredOut,
-			"records_aggregated":  resp.Decisions.Aggregated,
-			"access_level":        resp.Decisions.AccessLevelApplied,
-			"strategy":            resp.Decisions.Strategy,
-			"processing_time_ms":  resp.ProcessingTimeMs,
-			"field_decisions":     len(resp.Audit),
+			"request_id":         req.RequestID,
+			"status":             resp.Status,
+			"records_in":         resp.Decisions.TotalInput,
+			"records_returned":   resp.Decisions.Returned,
+			"records_filtered":   resp.Decisions.FilteredOut,
+			"records_aggregated": resp.Decisions.Aggregated,
+			"access_level":       resp.Decisions.AccessLevelApplied,
+			"strategy":           resp.Decisions.Strategy,
+			"processing_time_ms": resp.ProcessingTimeMs,
+			"field_decisions":    len(resp.Audit),
 		},
 	})
 }
@@ -394,4 +397,34 @@ func cloneRecord(rec model.DataRecord) model.DataRecord {
 		out.Fields[k] = v
 	}
 	return out
+}
+
+// SetExceptions installs the scoped-exception store used by the view generator.
+// Without one, nothing is exempted.
+func (p *Processor) SetExceptions(c *exceptions.Client) { p.generator.SetExceptions(c) }
+
+// SetNoticeDetail sets how specific the end-user notice is ("category" or "minimal").
+func (p *Processor) SetNoticeDetail(d string) { p.noticeDetail = d }
+
+// summarise lists the exceptions that were used and builds the end-user notice
+// for however many fields the view changed (a count only, never the values).
+func (p *Processor) summarise(disclosures []model.FieldDisclosure, requestID string) ([]string, *model.UserNotice) {
+	var ids []string
+	changed := 0
+	for _, d := range disclosures {
+		if d.ExceptionID != "" {
+			dup := false
+			for _, have := range ids {
+				dup = dup || have == d.ExceptionID
+			}
+			if !dup {
+				ids = append(ids, d.ExceptionID)
+			}
+			continue
+		}
+		if d.FinalState != "" && d.FinalState != d.OriginalState {
+			changed++
+		}
+	}
+	return ids, model.NewMaskedNotice(p.noticeDetail, requestID, changed)
 }

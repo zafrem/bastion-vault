@@ -2,8 +2,13 @@ package output
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"testing"
+	"time"
 
+	"github.com/zafrem/bastion-vault/internal/exceptions"
 	"github.com/zafrem/bastion-vault/internal/model"
 )
 
@@ -149,5 +154,63 @@ func TestViewGenerator_NilUserErrors(t *testing.T) {
 	g := NewViewGenerator()
 	if _, _, err := g.Generate(context.Background(), nil, nil, model.AccessFull); err == nil {
 		t.Fatal("expected error on nil user")
+	}
+}
+
+func excGenerator(t *testing.T, rule, tenant string) *ViewGenerator {
+	t.Helper()
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	c, err := exceptions.NewClient("vault", base64.StdEncoding.EncodeToString(pub), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, _ := exceptions.Sign(priv, exceptions.Payload{Kind: "update", IssuedAt: time.Now(), Exceptions: []exceptions.Exception{{
+		ID: "exc-view", Version: 1, Rule: rule, Modules: []string{"vault"}, TenantID: tenant,
+		ExpiresAt: time.Now().Add(time.Hour)}}})
+	if err := c.Apply(env); err != nil {
+		t.Fatal(err)
+	}
+	g := NewViewGenerator()
+	g.SetExceptions(c)
+	return g
+}
+
+func TestViewGenerator_ExceptionExemptsOnePIITypeForOneTenant(t *testing.T) {
+	g := excGenerator(t, "vault.view:email", "tenant-acme")
+	out, disc, err := g.Generate(context.Background(), []model.DataRecord{sampleCustomerRecord()}, userCtx(), model.AccessAnonymized)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := out[0].Fields["email"].Value; got != "alice@example.com" {
+		t.Errorf("exempted PII type should pass through, got %v", got)
+	}
+	if out[0].Fields["name"].Value == "Alice" {
+		t.Error("other pseudonymised fields must still be transformed")
+	}
+	found := false
+	for _, d := range disc {
+		if d.FieldName == "email" && d.ExceptionID == "exc-view" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("the audit trail must record which exception exempted the field")
+	}
+
+	other := userCtx()
+	other.TenantID = "tenant-globex"
+	out2, _, _ := g.Generate(context.Background(), []model.DataRecord{sampleCustomerRecord()}, other, model.AccessAnonymized)
+	if out2[0].Fields["email"].Value == "alice@example.com" {
+		t.Error("another tenant must still be masked")
+	}
+}
+
+func TestViewGenerator_ExceptionNeverLiftsStructuralLevels(t *testing.T) {
+	g := excGenerator(t, "vault.view:email", "tenant-acme")
+	for _, level := range []model.AccessLevel{model.AccessAggregated, model.AccessAuditLog, model.AccessLevel("bogus")} {
+		out, _, _ := g.Generate(context.Background(), []model.DataRecord{sampleCustomerRecord()}, userCtx(), level)
+		if out[0].Fields["email"].Value == "alice@example.com" {
+			t.Errorf("level %q must never expose a field, even with an exception", level)
+		}
 	}
 }

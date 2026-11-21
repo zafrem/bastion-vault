@@ -179,6 +179,10 @@ func newServerCmd() *cobra.Command {
 			// Phase 2 (Vault-OUT) processor: ties together permission resolution,
 			// view generation, token resolution, inference detection, and auditing.
 			processor := output.NewProcessor(ctrl, aud, store, provider)
+			processor.SetNoticeDetail(cfg.UserNotice.Detail)
+			if excClient.Enabled() {
+				processor.SetExceptions(excClient)
+			}
 
 			// Redis client for JWT blacklisting and session caching.
 			// Gracefully degrades to no-op when Redis is not configured.

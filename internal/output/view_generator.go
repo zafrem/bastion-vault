@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/zafrem/bastion-vault/internal/exceptions"
 	"github.com/zafrem/bastion-vault/internal/model"
 )
 
@@ -30,27 +31,46 @@ var sliceManufacturingAllowed = map[string]bool{
 // sliceManufacturingBlocked lists fields that must NEVER appear in a manufacturing
 // slice view, even if their name was not enumerated in the allow-list.
 var sliceManufacturingBlocked = map[string]bool{
-	"name":     true,
-	"contact":  true,
-	"address":  true,
-	"payment":  true,
-	"salary":   true,
-	"rrn":      true,
-	"email":    true,
-	"mobile":   true,
+	"name":    true,
+	"contact": true,
+	"address": true,
+	"payment": true,
+	"salary":  true,
+	"rrn":     true,
+	"email":   true,
+	"mobile":  true,
 }
 
 // sensitiveFieldsForRead are masked even at the `read` level — the user sees the
 // record but the highest-sensitivity identifiers stay hidden.
 var sensitiveFieldsForRead = map[string]bool{
-	"rrn":              true,
-	"social_security":  true,
-	"credit_card":      true,
+	"rrn":             true,
+	"social_security": true,
+	"credit_card":     true,
 }
 
 // ViewGenerator applies per-access-level transformations to a slice of DataRecords.
 // It is stateless and safe for concurrent use.
-type ViewGenerator struct{}
+type ViewGenerator struct {
+	exc *exceptions.Client // optional; nil = every field is transformed
+}
+
+// SetExceptions installs the scoped-exception store.
+func (g *ViewGenerator) SetExceptions(c *exceptions.Client) { g.exc = c }
+
+// exempt reports whether a scoped exception (rule "vault.view:<pii_type>") lets
+// this field through as stored. Only the levels that mask individual fields can be
+// exempted; aggregated, audit-log and unknown levels are structural and never are.
+func (g *ViewGenerator) exempt(fv model.FieldValue, user *model.UserContext, level model.AccessLevel) (string, bool) {
+	if g.exc == nil || fv.PIIType == "" {
+		return "", false
+	}
+	switch level {
+	case model.AccessRead, model.AccessAnonymized, model.AccessKAnonymized, model.AccessSlice:
+		return g.exc.Allowed("vault.view:"+string(fv.PIIType), user.TenantID, user.UserID)
+	}
+	return "", false
+}
 
 // NewViewGenerator constructs a ViewGenerator.
 func NewViewGenerator() *ViewGenerator {
@@ -100,6 +120,14 @@ func (g *ViewGenerator) transformRecord(
 	var disclosures []model.FieldDisclosure
 
 	for name, fv := range rec.Fields {
+		if id, ok := g.exempt(fv, user, level); ok {
+			out.Fields[name] = fv
+			disclosures = append(disclosures, model.FieldDisclosure{
+				FieldName: name, OriginalState: fv.Type, FinalState: fv.Type,
+				Reason: "exempted by exception " + id, ExceptionID: id,
+			})
+			continue
+		}
 		newFV, disc := g.transformField(name, fv, user, level)
 		out.Fields[name] = newFV
 		disclosures = append(disclosures, model.FieldDisclosure{
