@@ -187,7 +187,7 @@ func authenticateToken(ctx context.Context, cfg *config.Config, bl blacklistRead
 		if jti := claimString(claims, "jti"); jti != "" {
 			val, berr := bl.Get(ctx, jtiBlacklistKey(jti))
 			if berr != nil {
-				log.Printf("auth: blacklist check failed for jti=%q: %v", jti, berr) // #nosec G706 -- %q quotes and escapes the token id
+				log.Printf("auth: blacklist check failed for jti=%q: %v", logSafe(jti), berr) // #nosec G706 -- sanitised and %q-quoted
 				if !cfg.Auth.RevocationFailOpen {
 					// Fail closed: a Redis outage must not re-enable revoked tokens.
 					return nil, errRevocationUnavailable
@@ -262,4 +262,17 @@ func tenantFromCtx(ctx context.Context) string {
 		return id
 	}
 	return "default"
+}
+
+// logSafe neutralises line breaks and other control characters in a value that came from a request before it is
+// logged, so a caller cannot forge log lines. The explicit CR/LF replacements are what static analysis
+// (CodeQL go/log-injection) recognises as a sanitiser.
+func logSafe(s string) string {
+	s = strings.ReplaceAll(strings.ReplaceAll(s, "\n", "_"), "\r", "_")
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return '_'
+		}
+		return r
+	}, s)
 }
