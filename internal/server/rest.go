@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"sync"
@@ -712,7 +713,9 @@ func (s *Server) handleErasure(w http.ResponseWriter, r *http.Request) {
 	if actorID == "" {
 		actorID = user.ID
 	}
-	s.auditor.Log(r.Context(), model.AuditEvent{ //nolint:errcheck
+	// The erasure has already happened and cannot be undone, so a failed audit write is reported loudly
+	// instead of changing the outcome.
+	if _, aerr := s.auditor.Log(r.Context(), model.AuditEvent{
 		TenantID:     tenantID,
 		EventType:    model.AuditEventErasure,
 		ActorID:      actorID,
@@ -723,7 +726,9 @@ func (s *Server) handleErasure(w http.ResponseWriter, r *http.Request) {
 		Metadata: map[string]any{
 			"entries_deleted": deleted,
 		},
-	})
+	}); aerr != nil {
+		log.Printf("AUDIT WRITE FAILED for tenant erasure (tenant %q, %d entries deleted): %v", tenantID, deleted, aerr) // #nosec G706 -- %q quotes and escapes the value
+	}
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -1181,15 +1186,23 @@ func (s *Server) handleGetPermissions(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// writeBody encodes v to the response. A failure here almost always means the client went away after the
+// status was sent, so there is nothing to tell the caller, but it is logged so it is not invisible.
+func writeBody(w http.ResponseWriter, v any) {
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		log.Printf("response write failed: %v", err)
+	}
+}
+
 func jsonOK(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(v) //nolint:errcheck
+	writeBody(w, v)
 }
 
 func jsonError(w http.ResponseWriter, msg string, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(map[string]string{"error": msg}) //nolint:errcheck
+	writeBody(w, map[string]string{"error": msg})
 }
 
 // ─── Honey-token handlers ─────────────────────────────────────────────────────
@@ -1246,7 +1259,7 @@ func (s *Server) handleCreateHoneyToken(w http.ResponseWriter, r *http.Request) 
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(token) //nolint:errcheck
+	writeBody(w, token)
 }
 
 // POST /v1/vault/honey-tokens/{id}/inject

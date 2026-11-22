@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -62,7 +63,7 @@ func (m *Manager) Request(ctx context.Context, requesterID, incidentID, reason s
 	m.requests[req.ID] = req
 	m.mu.Unlock()
 
-	m.auditor.Log(ctx, model.AuditEvent{ //nolint:errcheck
+	m.audit(ctx, model.AuditEvent{
 		EventType:   model.AuditEventBreakGlass,
 		ActorID:     requesterID,
 		ResourceType: "break_glass",
@@ -114,7 +115,7 @@ func (m *Manager) Approve(ctx context.Context, requestID, approverID string) (*m
 		req.ExpiresAt = time.Now().UTC().Add(req.Duration)
 		req.Token = newBGToken()
 
-		m.auditor.Log(ctx, model.AuditEvent{ //nolint:errcheck
+		m.audit(ctx, model.AuditEvent{
 			EventType:    model.AuditEventBreakGlass,
 			ActorID:      approverID,
 			ResourceType: "break_glass",
@@ -148,7 +149,7 @@ func (m *Manager) Revoke(ctx context.Context, requestID, revokerID string) error
 	req.Status = model.BGStatusRevoked
 	req.Token = ""
 
-	m.auditor.Log(ctx, model.AuditEvent{ //nolint:errcheck
+	m.audit(ctx, model.AuditEvent{
 		EventType:    model.AuditEventBreakGlass,
 		ActorID:      revokerID,
 		ResourceType: "break_glass",
@@ -222,4 +223,13 @@ func newBGToken() string {
 	b := make([]byte, 32)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// audit records a break-glass step. The lifecycle step has already been applied in memory, so a failed audit
+// write does not undo it, but it is logged prominently: break-glass access without an audit trail is exactly
+// what operators need to hear about.
+func (m *Manager) audit(ctx context.Context, ev model.AuditEvent) {
+	if _, err := m.auditor.Log(ctx, ev); err != nil {
+		log.Printf("AUDIT WRITE FAILED for break-glass %s (actor %q, resource %q): %v", ev.Action, ev.ActorID, ev.ResourceID, err)
+	}
 }

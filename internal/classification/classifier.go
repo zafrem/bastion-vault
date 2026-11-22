@@ -27,7 +27,7 @@ type PatternSet struct {
 // BASTION_PATTERN_DIR is not set (or a YAML file is missing) and no config
 // override is provided.
 func DefaultPatternSet() PatternSet {
-	return PatternSet{
+	return PatternSet{ // #nosec G101 -- regular expressions, not credentials
 		KoreanRRN:    `\d{6}-[1-4]\d{6}`,
 		KoreanMobile: `01[016789]-?\d{3,4}-?\d{4}`,
 		Email:        `[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}`,

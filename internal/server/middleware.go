@@ -50,7 +50,7 @@ func loggingMiddleware(next http.Handler) http.Handler {
 		start := time.Now()
 		rw := &responseWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rw, r)
-		log.Printf("method=%q path=%q status=%d duration=%s remote=%q",
+		log.Printf("method=%q path=%q status=%d duration=%s remote=%q", // #nosec G706 -- %q quotes and escapes request-supplied values
 			r.Method, r.URL.Path, rw.status, time.Since(start), r.RemoteAddr)
 	})
 }
@@ -187,7 +187,7 @@ func authenticateToken(ctx context.Context, cfg *config.Config, bl blacklistRead
 		if jti := claimString(claims, "jti"); jti != "" {
 			val, berr := bl.Get(ctx, jtiBlacklistKey(jti))
 			if berr != nil {
-				log.Printf("auth: blacklist check failed for jti=%q: %v", jti, berr)
+				log.Printf("auth: blacklist check failed for jti=%q: %v", jti, berr) // #nosec G706 -- %q quotes and escapes the token id
 				if !cfg.Auth.RevocationFailOpen {
 					// Fail closed: a Redis outage must not re-enable revoked tokens.
 					return nil, errRevocationUnavailable

@@ -319,7 +319,9 @@ func newAnonymizeCmd() *cobra.Command {
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
 			for _, r := range resp.Records {
-				enc.Encode(r) //nolint:errcheck
+				if err := enc.Encode(r); err != nil {
+					return fmt.Errorf("write record: %w", err)
+				}
 			}
 			return nil
 		},
@@ -328,7 +330,7 @@ func newAnonymizeCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&requesterID, "requester", "r", "cli-user", "requester ID")
 	cmd.Flags().StringVarP(&purpose, "purpose", "p", "testing", "access purpose")
 	cmd.Flags().StringVarP(&inputFile, "input", "i", "", "JSONL input file (required)")
-	cmd.MarkFlagRequired("input") //nolint:errcheck
+	requireFlag(cmd, "input")
 	return cmd
 }
 
@@ -365,7 +367,7 @@ func newDetectPIICmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&inputFile, "input", "i", "", "JSONL input file (required)")
-	cmd.MarkFlagRequired("input") //nolint:errcheck
+	requireFlag(cmd, "input")
 	return cmd
 }
 
@@ -394,7 +396,7 @@ func newClassifyCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&inputFile, "input", "i", "", "JSONL input file (required)")
-	cmd.MarkFlagRequired("input") //nolint:errcheck
+	requireFlag(cmd, "input")
 	return cmd
 }
 
@@ -440,7 +442,7 @@ func newKAnonCheckCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&categoryS, "category", "t", "DC-01", "data category")
 	cmd.Flags().IntVarP(&requiredK, "k", "k", 5, "required K value")
 	cmd.Flags().BoolVarP(&generalize, "generalize", "g", false, "auto-generalize until K-anonymous")
-	cmd.MarkFlagRequired("input") //nolint:errcheck
+	requireFlag(cmd, "input")
 	return cmd
 }
 
@@ -708,4 +710,12 @@ func printKAnonReport(report *model.KAnonymityReport) {
 		lines = append(lines, fmt.Sprintf("  Generalized %s: %s → %s", step.Field, step.From, step.To))
 	}
 	printBox("K-Anonymity Report", lines)
+}
+
+// requireFlag marks a flag required. It fails only if the flag was never defined, which is a programming
+// error that should stop the program at start-up rather than be ignored.
+func requireFlag(cmd *cobra.Command, name string) {
+	if err := cmd.MarkFlagRequired(name); err != nil {
+		panic(fmt.Sprintf("vault: %v", err))
+	}
 }

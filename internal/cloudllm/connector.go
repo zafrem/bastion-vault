@@ -187,7 +187,7 @@ func (c *Connector) deanonymizeText(
 
 // DefaultTokenPattern matches Vault deterministic tokens of the form
 // PREFIX_TYPE_hex16. Override via cloud_llm.token_pattern in vault.yaml.
-const DefaultTokenPattern = `[A-Z]{2,}_[A-Z]{2,}_[a-z0-9]{16}`
+const DefaultTokenPattern = `[A-Z]{2,}_[A-Z]{2,}_[a-z0-9]{16}` // #nosec G101 -- a regular expression, not a credential
 
 // tokenPatternDefault is the compiled DefaultTokenPattern used when a Connector
 // is built without an override.

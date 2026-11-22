@@ -93,7 +93,7 @@ func (p *Publisher) Publish(ev VaultEvent) {
 
 func (p *Publisher) Close() {
 	if p != nil && p.nc != nil {
-		p.nc.Drain() //nolint:errcheck
+		_ = p.nc.Drain()
 	}
 }
 
