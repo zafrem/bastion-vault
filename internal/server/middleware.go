@@ -187,7 +187,7 @@ func authenticateToken(ctx context.Context, cfg *config.Config, bl blacklistRead
 		if jti := claimString(claims, "jti"); jti != "" {
 			val, berr := bl.Get(ctx, jtiBlacklistKey(jti))
 			if berr != nil {
-				log.Printf("auth: blacklist check failed for jti=%q: %v", logSafe(jti), berr) // #nosec G706 -- sanitised and %q-quoted
+				log.Printf("auth: blacklist check failed for jti=%q: %v", logSafe(jti), logSafe(berr.Error())) // #nosec G706 -- both values sanitised; the error text can embed the key
 				if !cfg.Auth.RevocationFailOpen {
 					// Fail closed: a Redis outage must not re-enable revoked tokens.
 					return nil, errRevocationUnavailable
