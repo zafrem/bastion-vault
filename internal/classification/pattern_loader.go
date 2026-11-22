@@ -1,6 +1,7 @@
 package classification
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -34,9 +35,16 @@ var patternIDtoPII = map[string]model.PIIType{
 // down the classifier; the hardcoded fallbacks remain active.
 func LoadPatternsFromDir(regexRoot string) map[model.PIIType][]*regexp.Regexp {
 	out := make(map[model.PIIType][]*regexp.Regexp)
-	files, _ := filepath.Glob(filepath.Join(regexRoot, "pii", "kr", "*.yml"))
+	// Read through an os.Root so a symlink in the directory cannot lead the loader to a file outside it,
+	// and the directory cannot be swapped between listing and reading (CWE-22/367).
+	root, err := os.OpenRoot(filepath.Join(regexRoot, "pii", "kr"))
+	if err != nil {
+		return out // no pattern directory: the hardcoded fallbacks stay in use
+	}
+	defer root.Close()
+	files, _ := fs.Glob(root.FS(), "*.yml")
 	for _, f := range files {
-		data, err := os.ReadFile(f) // #nosec G304 -- path comes from operator config or CLI, not request input
+		data, err := root.ReadFile(f)
 		if err != nil {
 			continue
 		}

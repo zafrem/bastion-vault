@@ -207,6 +207,9 @@ func newServerCmd() *cobra.Command {
 			netSrv := &http.Server{
 				Addr:    httpAddr,
 				Handler: httpSrv.Router(),
+				// Bound how long a client may take to send its headers, so slow connections cannot
+				// hold sockets open indefinitely (Slowloris).
+				ReadHeaderTimeout: 10 * time.Second,
 			}
 			go func() {
 				if err := netSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

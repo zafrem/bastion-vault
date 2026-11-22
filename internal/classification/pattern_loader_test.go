@@ -92,3 +92,46 @@ func TestLoadPatternsFromDir_BadYAMLIsSkipped(t *testing.T) {
 		t.Errorf("expected empty map for bad YAML, got %d entries", len(patterns))
 	}
 }
+
+const rrnYAML = "patterns:\n  - id: rrn_01\n    langs:\n      go: '\\d{6}-[1-4]\\d{6}'\n"
+
+func krDir(t *testing.T) (root, kr string) {
+	t.Helper()
+	root = t.TempDir()
+	kr = filepath.Join(root, "pii", "kr")
+	if err := os.MkdirAll(kr, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return root, kr
+}
+
+func TestLoadPatternsFromDir_ReadsFilesInTheDirectory(t *testing.T) {
+	root, kr := krDir(t)
+	if err := os.WriteFile(filepath.Join(kr, "rrn.yml"), []byte(rrnYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := classification.LoadPatternsFromDir(root)[model.PIIKoreanRRN]; len(got) != 1 {
+		t.Fatalf("want 1 RRN pattern, got %d", len(got))
+	}
+}
+
+func TestLoadPatternsFromDir_MissingDirectoryIsEmptyNotAnError(t *testing.T) {
+	if got := classification.LoadPatternsFromDir(t.TempDir()); len(got) != 0 {
+		t.Errorf("no pattern directory should load nothing, got %v", got)
+	}
+}
+
+// A symlink in the pattern directory must not pull in a file from elsewhere on disk.
+func TestLoadPatternsFromDir_SymlinkLeavingTheDirectoryIsIgnored(t *testing.T) {
+	root, kr := krDir(t)
+	outside := filepath.Join(t.TempDir(), "elsewhere.yml")
+	if err := os.WriteFile(outside, []byte(rrnYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(kr, "link.yml")); err != nil {
+		t.Skip("symlinks unavailable:", err)
+	}
+	if got := classification.LoadPatternsFromDir(root); len(got) != 0 {
+		t.Errorf("a pattern file outside the directory must not load, got %v", got)
+	}
+}

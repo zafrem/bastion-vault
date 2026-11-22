@@ -3,6 +3,7 @@ package classification
 import (
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/zafrem/bastion-vault/internal/model"
@@ -275,9 +276,9 @@ func (c *Classifier) buildRecommendation(cat model.DataCategory, detections []mo
 		}
 	}
 	if l1Count > 0 {
-		return "Apply deterministic tokenization or HMAC for L1 identifiers before storage; enforce k-anonymity K=" + itoa(k)
+		return "Apply deterministic tokenization or HMAC for L1 identifiers before storage; enforce k-anonymity K=" + strconv.Itoa(k)
 	}
-	return "Apply partial masking for indirect identifiers; enforce k-anonymity K=" + itoa(k)
+	return "Apply partial masking for indirect identifiers; enforce k-anonymity K=" + strconv.Itoa(k)
 }
 
 func anyToString(v any) string {
@@ -290,20 +291,4 @@ func anyToString(v any) string {
 	default:
 		return ""
 	}
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	buf := [20]byte{}
-	pos := len(buf)
-	for n >= 10 {
-		pos--
-		buf[pos] = byte('0' + n%10)
-		n /= 10
-	}
-	pos--
-	buf[pos] = byte('0' + n)
-	return string(buf[pos:])
 }
