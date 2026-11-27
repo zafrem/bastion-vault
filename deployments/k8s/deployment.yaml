@@ -46,7 +46,10 @@ spec:
                 secretKeyRef:
                   name: bastion-vault-secrets
                   key: jwt-secret
-            - name: VAULT_DATABASE_DSN
+            # Replicas share one token store. Apply deployments/sql/001_token_mappings.sql to the database first.
+            - name: VAULT_TOKEN_STORE_DRIVER
+              value: "postgres"
+            - name: VAULT_TOKEN_STORE_DSN
               valueFrom:
                 secretKeyRef:
                   name: bastion-vault-secrets

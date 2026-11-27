@@ -54,8 +54,8 @@ func (s *TokenizationStrategy) Apply(ctx context.Context, value string, p Params
 			CreatedAt: time.Now().UTC(),
 		}
 		if err := s.store.Put(ctx, entry); err != nil {
-			// Non-fatal: log would go here in production; continue with the token.
-			_ = err
+			// A token whose mapping was not saved can never be reversed, so it must not be handed out.
+			return "", fmt.Errorf("tokenization: saving the mapping: %w", err)
 		}
 	}
 

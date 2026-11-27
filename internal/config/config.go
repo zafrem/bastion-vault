@@ -80,6 +80,8 @@ type EventsConfig struct {
 type TokenStoreConfig struct {
 	Driver string `mapstructure:"driver"` // "memory", "postgres", or "sqlite"
 	DSN    string `mapstructure:"dsn"`    // postgres DSN or sqlite file path when driver=postgres/sqlite
+	// AllowLegacyPlaintext reads rows stored by versions that did not encrypt, and re-encrypts them.
+	AllowLegacyPlaintext bool `mapstructure:"allow_legacy_plaintext"`
 }
 
 // RateLimitConfig configures the per-IP token-bucket rate limiter.
@@ -228,6 +230,9 @@ func Load(cfgFile string) (*Config, error) {
 	v.SetDefault("kms.local.key_dir", "./keys")
 	v.SetDefault("kms.vault.mount_path", "transit")
 	v.SetDefault("token_store.driver", "memory")
+	// A key needs a default for its environment variable to be read when no config file mentions it.
+	v.SetDefault("token_store.dsn", "")
+	v.SetDefault("token_store.allow_legacy_plaintext", false)
 	v.SetDefault("rate_limit.enabled", false)
 	v.SetDefault("rate_limit.rps", 100)
 	v.SetDefault("rate_limit.burst", 200)

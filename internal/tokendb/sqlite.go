@@ -24,8 +24,8 @@ import (
 )
 
 // SQLiteStore persists token mappings in a SQLite database.
-// The original field is stored as opaque bytes — callers are responsible for
-// encrypting / decrypting with the tenant's DEK.
+// The original field is stored as opaque bytes; wrap the store in an EncryptedStore so that they are
+// ciphertext.
 type SQLiteStore struct {
 	db *sql.DB
 }
@@ -56,7 +56,7 @@ func NewSQLiteStore(db *sql.DB) (*SQLiteStore, error) {
 }
 
 // Put inserts or replaces a token mapping.
-// Caller must encrypt e.Original before calling Put.
+// It stores e.Original as given: use an EncryptedStore.
 func (s *SQLiteStore) Put(ctx context.Context, e Entry) error {
 	if e.CreatedAt.IsZero() {
 		e.CreatedAt = time.Now().UTC()
@@ -77,7 +77,7 @@ func (s *SQLiteStore) Put(ctx context.Context, e Entry) error {
 }
 
 // Get retrieves a token mapping.
-// The returned Entry.Original contains ciphertext — caller must decrypt it.
+// The returned Entry.Original is the stored bytes.
 // Returns (nil, nil) when the token does not exist for the tenant.
 func (s *SQLiteStore) Get(ctx context.Context, token, tenantID string) (*Entry, error) {
 	row := s.db.QueryRowContext(ctx, `
@@ -98,6 +98,13 @@ func (s *SQLiteStore) Get(ctx context.Context, token, tenantID string) (*Entry, 
 	}
 	e.Original = string(original)
 	return &e, nil
+}
+
+func (s *SQLiteStore) replaceOriginal(ctx context.Context, token, tenantID string, old, replacement []byte) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE token_mappings SET original = ? WHERE token = ? AND tenant_id = ? AND original = ?`,
+		replacement, token, tenantID, old)
+	return err
 }
 
 // Delete removes a single token mapping.

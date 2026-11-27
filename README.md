@@ -183,6 +183,8 @@ Token revocation fails closed: if the Redis revocation list can't be queried, re
 VAULT_MASTER_KEY=$(openssl rand -hex 32) VAULT_AUTH_JWT_SECRET=$(openssl rand -hex 32) docker compose -f deployments/docker-compose.yml up -d
 ```
 
+Compose stores token mappings in Postgres. Keep `VAULT_MASTER_KEY`: with a different key the stored values cannot be read.
+
 ---
 
 ## CLI Usage
@@ -507,6 +509,9 @@ Key settings:
 | `kms.provider` | `VAULT_KMS_PROVIDER` | `local` | `local` / `aws` / `vault` |
 | `kms.local.master_key` | `VAULT_KMS_LOCAL_MASTER_KEY` | — | 32-byte hex AES-256 key (required) |
 | `kms.dek_cache_ttl` | `VAULT_KMS_DEK_CACHE_TTL` | `5m` | DEK cache TTL |
+| `token_store.driver` | `VAULT_TOKEN_STORE_DRIVER` | `memory` | `memory` / `postgres` / `sqlite` (see [Token store](#token-store)) |
+| `token_store.dsn` | `VAULT_TOKEN_STORE_DSN` | — | Postgres DSN, or SQLite file path (`vault-tokens.db`) |
+| `token_store.allow_legacy_plaintext` | `VAULT_TOKEN_STORE_ALLOW_LEGACY_PLAINTEXT` | `false` | Read rows stored unencrypted by older versions and re-encrypt them |
 | `opa.policy_dir` | `VAULT_OPA_POLICY_DIR` | `./policies` | Rego policy directory |
 | `audit.output_dir` | `VAULT_AUDIT_OUTPUT_DIR` | `./audit-logs` | Audit log output dir |
 | `audit.signing_enabled` | `VAULT_AUDIT_SIGNING_ENABLED` | `true` | Sign audit entries |
@@ -514,7 +519,33 @@ Key settings:
 | `log.level` | `VAULT_LOG_LEVEL` | `info` | `debug`/`info`/`warn`/`error` |
 | `log.format` | `VAULT_LOG_FORMAT` | `json` | `json` or `text` |
 
-See `configs/vault.yaml` for the full annotated configuration reference.
+See `configs/vault.yaml` for the full annotated configuration reference. The `database` section is not used for token mappings.
+
+### Token store
+
+The token store maps each token back to its original value.
+
+| Driver | Survives a restart | Shared between replicas | Use for |
+|---|---|---|---|
+| `memory` | no | no | local development only |
+| `sqlite` | yes | no | a single instance with a writable volume |
+| `postgres` | yes | yes | production, and anything with more than one replica |
+
+A driver that cannot be used (unknown name, missing DSN, unreachable database, missing table) stops startup. If a mapping cannot be saved, the anonymize request fails, so no token is handed out that could never be reversed.
+
+**Postgres setup.** Apply [`deployments/sql/001_token_mappings.sql`](deployments/sql/001_token_mappings.sql) before starting Vault. Docker Compose applies it when it first creates the database volume.
+
+**Encryption at rest.** With `sqlite` and `postgres`, originals are encrypted with AES-256-GCM before they are written. A data key from the KMS encrypts the value, and the wrapped data key is stored in the same column, so a row can be read with the same KMS master key after a restart or on another replica. The tenant and token are authenticated: a ciphertext copied to another row does not decrypt. Data keys are cached for `kms.dek_cache_ttl`. Losing the KMS master key makes every stored original unrecoverable, so back it up separately from the database.
+
+With the HashiCorp provider, each tenant needs a transit key named `tenant-<tenant id>-tokens`, and the Vault token needs `datakey/plaintext` and `decrypt` on it.
+
+**Upgrading from a version that stored plaintext.** Old rows are refused by default. Set `token_store.allow_legacy_plaintext: true` to read them; each one is re-encrypted the first time it is read. Rows that are never read stay in plaintext, so re-run anonymization over the source data to rewrite them, then check that none remain and turn the setting off:
+
+```sql
+SELECT count(*) FROM token_mappings WHERE substring(original FROM 1 FOR 5) <> '\x0062767431'::bytea;
+```
+
+While the setting is on, anyone who can write to the database can plant values.
 
 ---
 
@@ -569,7 +600,7 @@ bastion-vault/
 │   ├── kanon/validator.go          # K-anonymity validation + auto-generalization
 │   ├── breakglass/manager.go       # Dual-approval break-glass workflow
 │   ├── tenant/isolation.go         # Per-tenant config registry + context helpers
-│   ├── tokendb/                    # Token store (memory + postgres)
+│   ├── tokendb/                    # Token store (memory, SQLite, Postgres; encrypted at rest)
 │   ├── audit/
 │   │   ├── event.go                # Append-only JSONL logger, HMAC-SHA256 signing
 │   │   └── retention.go            # 24 h retention worker

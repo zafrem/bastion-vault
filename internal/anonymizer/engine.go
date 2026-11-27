@@ -290,9 +290,10 @@ func (e *Engine) transformRecord(
 		if pol.maskForSearch {
 			tokenizer := e.strategyMap[model.StrategyDeterministicTokenization]
 			token, terr := tokenizer.Apply(ctx, strVal, params)
-			if terr == nil {
-				out[k+"_search_token"] = token
+			if terr != nil {
+				return nil, 0, nil, fmt.Errorf("field %q: search token: %w", k, terr)
 			}
+			out[k+"_search_token"] = token
 		}
 	}
 

@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -15,7 +14,6 @@ import (
 	"syscall"
 	"time"
 
-	_ "github.com/lib/pq"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
 
@@ -105,18 +103,6 @@ func loadDeps(cfg *config.Config) (*kms.Manager, kms.Provider, *audit.Logger, er
 	return mgr, provider, aud, nil
 }
 
-// newTokenStore builds the token persistence backend from configuration.
-func newTokenStore(cfg *config.Config) (tokendb.Store, error) {
-	if cfg.TokenStore.Driver == "postgres" {
-		db, err := sql.Open("postgres", cfg.TokenStore.DSN)
-		if err != nil {
-			return nil, fmt.Errorf("token store: %w", err)
-		}
-		return tokendb.NewPostgresStore(db), nil
-	}
-	return tokendb.NewMemoryStore(), nil
-}
-
 func newServerCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "server",
@@ -141,7 +127,7 @@ func newServerCmd() *cobra.Command {
 			defer stopRetention()
 
 			cls := classification.NewWithPatterns(cfg.Classification.Patterns)
-			store, err := newTokenStore(cfg)
+			store, err := newTokenStore(cfg, provider)
 			if err != nil {
 				return err
 			}

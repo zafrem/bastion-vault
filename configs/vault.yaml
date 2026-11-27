@@ -28,6 +28,7 @@ kms:
     mount_path: transit
     key_name: bastion-master
 
+# Not used for token mappings: configure token_store below.
 database:
   dsn: "postgres://vault:vault@localhost:5432/bastion_vault?sslmode=disable"
   max_open_conns: 20
@@ -66,8 +67,11 @@ auth:
 
 token_store:
   driver: memory            # memory | postgres | sqlite
-  dsn: ""                   # postgres DSN or sqlite file path (e.g. file:tokens.db?cache=shared&_journal=WAL)
-                            # sqlite: omit for default file, use "file::memory:?mode=memory" for in-process testing
+  dsn: ""                   # postgres DSN, or sqlite file path (default vault-tokens.db)
+  # Originals are always encrypted (with a KMS data key) before they reach postgres or sqlite.
+  # Rows stored by older versions are plaintext and are refused. Turn this on to read them once and
+  # re-encrypt them, then turn it off again.
+  allow_legacy_plaintext: false
 
 rate_limit:
   enabled: false

@@ -1,6 +1,6 @@
 package tokendb
 
-// PostgreSQL schema (apply once during migration):
+// PostgreSQL schema (apply deployments/sql/001_token_mappings.sql before starting Vault):
 //
 //	CREATE TABLE token_mappings (
 //	  token      TEXT NOT NULL,
@@ -12,9 +12,8 @@ package tokendb
 //	);
 //	CREATE INDEX idx_token_mappings_tenant ON token_mappings(tenant_id);
 //
-// NOTE: The `original` column stores ciphertext produced by the tenant's DEK
-// (AES-256-GCM). The caller must encrypt the plaintext before calling Put and
-// decrypt it after calling Get. See the comment on each method below.
+// NOTE: this store writes e.Original as given. Wrap it in an EncryptedStore (the server does) so that the
+// `original` column holds ciphertext.
 
 import (
 	"context"
@@ -36,7 +35,7 @@ func NewPostgresStore(db *sql.DB) *PostgresStore {
 }
 
 // Put inserts or replaces a token mapping.
-// caller must encrypt e.Original before calling Put.
+// It stores e.Original as given: use an EncryptedStore.
 func (s *PostgresStore) Put(ctx context.Context, e Entry) error {
 	if e.CreatedAt.IsZero() {
 		e.CreatedAt = time.Now().UTC()
@@ -57,7 +56,7 @@ func (s *PostgresStore) Put(ctx context.Context, e Entry) error {
 }
 
 // Get retrieves a token mapping.
-// The returned Entry.Original contains ciphertext — caller must decrypt it.
+// The returned Entry.Original is the stored bytes.
 // Returns (nil, nil) when the token does not exist for the tenant.
 func (s *PostgresStore) Get(ctx context.Context, token, tenantID string) (*Entry, error) {
 	row := s.db.QueryRowContext(ctx, `
@@ -78,6 +77,13 @@ func (s *PostgresStore) Get(ctx context.Context, token, tenantID string) (*Entry
 	}
 	e.Original = string(original)
 	return &e, nil
+}
+
+func (s *PostgresStore) replaceOriginal(ctx context.Context, token, tenantID string, old, replacement []byte) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE token_mappings SET original = $1 WHERE token = $2 AND tenant_id = $3 AND original = $4`,
+		replacement, token, tenantID, old)
+	return err
 }
 
 // Delete removes a single token mapping.
