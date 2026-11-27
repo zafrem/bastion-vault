@@ -43,7 +43,7 @@ func (s *TokenizationStrategy) Apply(ctx context.Context, value string, p Params
 	if len(token) > 22 {
 		token = token[:22]
 	}
-	tok := "TOK:" + token
+	tok := tokendb.TokenPrefix + token
 
 	if s.store != nil {
 		entry := tokendb.Entry{
@@ -68,11 +68,7 @@ func (s *TokenizationStrategy) Reverse(ctx context.Context, value string, p Para
 	if s.store == nil {
 		return "", ErrNotReversible{Strategy: s.Name()}
 	}
-	// Strip the "TOK:" prefix before looking up.
-	tok := value
-	if strings.HasPrefix(tok, "TOK:") {
-		tok = tok[4:]
-	}
+	tok := strings.TrimPrefix(value, tokendb.TokenPrefix)
 	entry, err := s.store.Get(ctx, tok, p.TenantID)
 	if err != nil {
 		return "", fmt.Errorf("tokenization: store lookup: %w", err)

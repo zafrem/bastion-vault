@@ -42,7 +42,22 @@ func NewManager(primary Provider, cacheTTL time.Duration, fallbacks ...Provider)
 	return m
 }
 
+// GenerateDataKey returns a new data key from the first provider that can make one.
+func (m *Manager) GenerateDataKey(ctx context.Context, masterKeyID string) (*DataKey, error) {
+	return m.generateWithFailover(ctx, masterKeyID)
+}
+
+// DecryptDataKey unwraps a data key; it is DecryptDEK under the Provider method name.
+func (m *Manager) DecryptDataKey(ctx context.Context, ciphertext []byte, masterKeyID string) ([]byte, error) {
+	return m.DecryptDEK(ctx, ciphertext, masterKeyID)
+}
+
+// CacheTTL is how long a data key may be reused.
+func (m *Manager) CacheTTL() time.Duration { return m.cacheTTL }
+
 // GetOrGenerateDEK returns a cached DEK for cacheKey or generates a fresh one.
+// Anything encrypted with it must store DataKey.Ciphertext next to the result, or it cannot be decrypted once
+// the cache entry expires; package envelope does that.
 func (m *Manager) GetOrGenerateDEK(ctx context.Context, masterKeyID, cacheKey string) (*DataKey, error) {
 	if dk := m.fromCache(cacheKey); dk != nil {
 		return dk, nil

@@ -1,6 +1,8 @@
 package strategies_test
 
 import (
+	"crypto/cipher"
+	"crypto/aes"
 	"context"
 	"crypto/rand"
 	"strings"
@@ -250,7 +252,7 @@ func TestSuppression_Reverse_Error(t *testing.T) {
 func TestEncryption_Apply_Prefix(t *testing.T) {
 	key := mustBytes(t, 32)
 	s := strategies.NewEncryption()
-	result, err := s.Apply(context.Background(), "plaintext", strategies.Params{EncryptionKey: key})
+	result, err := s.Apply(context.Background(), "plaintext", strategies.Params{Cipher: gcmCipher(t, key)})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -262,7 +264,7 @@ func TestEncryption_Apply_Prefix(t *testing.T) {
 func TestEncryption_RoundTrip(t *testing.T) {
 	key := mustBytes(t, 32)
 	s := strategies.NewEncryption()
-	p := strategies.Params{EncryptionKey: key}
+	p := strategies.Params{Cipher: gcmCipher(t, key)}
 
 	ct, err := s.Apply(context.Background(), "my secret salary 99000000", p)
 	if err != nil {
@@ -281,12 +283,41 @@ func TestEncryption_WrongKey_Fails(t *testing.T) {
 	k1, k2 := mustBytes(t, 32), mustBytes(t, 32)
 	s := strategies.NewEncryption()
 
-	ct, err := s.Apply(context.Background(), "secret", strategies.Params{EncryptionKey: k1})
+	ct, err := s.Apply(context.Background(), "secret", strategies.Params{Cipher: gcmCipher(t, k1)})
 	if err != nil {
 		t.Fatalf("Apply error: %v", err)
 	}
-	_, err = s.Reverse(context.Background(), ct, strategies.Params{EncryptionKey: k2})
+	_, err = s.Reverse(context.Background(), ct, strategies.Params{Cipher: gcmCipher(t, k2)})
 	if err == nil {
 		t.Error("expected error decrypting with wrong key")
 	}
+}
+
+// testCipher is a plain AES-GCM ValueCipher; the engine's envelope encryption is tested in package anonymizer.
+type testCipher struct{ aead cipher.AEAD }
+
+func gcmCipher(t *testing.T, key []byte) testCipher {
+	t.Helper()
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return testCipher{aead}
+}
+
+func (c testCipher) Encrypt(_ context.Context, plain []byte) ([]byte, error) {
+	nonce := make([]byte, c.aead.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, err
+	}
+	return c.aead.Seal(nonce, nonce, plain, nil), nil
+}
+
+func (c testCipher) Decrypt(_ context.Context, sealed []byte) ([]byte, error) {
+	n := c.aead.NonceSize()
+	return c.aead.Open(nil, sealed[:n], sealed[n:], nil)
 }

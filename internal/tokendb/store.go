@@ -5,6 +5,9 @@ import (
 	"time"
 )
 
+// TokenPrefix marks a token in anonymized output. Stores key their rows by the token without it.
+const TokenPrefix = "TOK:"
+
 // Entry holds one token→original mapping for a specific tenant.
 type Entry struct {
 	Token     string

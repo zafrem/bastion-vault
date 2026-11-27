@@ -3,6 +3,7 @@ package output
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/zafrem/bastion-vault/internal/kms"
 	"github.com/zafrem/bastion-vault/internal/model"
@@ -29,7 +30,8 @@ func NewTokenResolver(store tokendb.Store, provider kms.Provider, canDeanon func
 	}
 }
 
-// Resolve looks up the original value for a token within tenantID. It returns
+// Resolve looks up the original value for a token within tenantID. The token may be given as anonymize
+// returned it ("TOK:...") or without that prefix. It returns
 // ("", nil) when the token does not exist so callers can choose to keep the
 // token in place instead of erroring out.
 func (t *TokenResolver) Resolve(ctx context.Context, token string, tenantID string) (string, error) {
@@ -39,7 +41,7 @@ func (t *TokenResolver) Resolve(ctx context.Context, token string, tenantID stri
 	if token == "" {
 		return "", nil
 	}
-	entry, err := t.store.Get(ctx, token, tenantID)
+	entry, err := t.store.Get(ctx, strings.TrimPrefix(token, tokendb.TokenPrefix), tenantID)
 	if err != nil {
 		return "", fmt.Errorf("token resolver: store lookup: %w", err)
 	}

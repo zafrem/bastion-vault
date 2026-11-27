@@ -64,7 +64,7 @@ All operations are RBAC-enforced, KMS-backed, and fully audit-trailed for PIPA (
 ```
 Master Key (KEK) — stored in KMS provider
 ├── Tenant Key (TK) — derived per tenant
-│   ├── DEK (per-operation, ephemeral, 5-min TTL cache) — encrypts PII data
+│   ├── DEK (reused for 5 min; stored wrapped inside each encrypted value) — encrypts PII data
 │   └── HMAC Key — deterministic tokenization (same input → same token)
 └── Audit Key — audit log entry signing
 ```
@@ -328,11 +328,13 @@ Content-Type: application/json
 
 {
   "category": "DC-03",
-  "records": [{"salary": "ENC:..."}],
+  "records": [{"salary": "ENC:v1:..."}],
   "requester_id": "hr-manager-1",
   "justification": "payroll audit Q2"
 }
 ```
+
+`ENC:v1:` values carry their wrapped data key and open only for the tenant and category they were encrypted for. Values without `v1:` come from earlier versions, which did not keep the key: they cannot be decrypted and must be anonymized again from the source.
 
 ### Classify
 
@@ -435,6 +437,9 @@ Content-Type: application/json
 
 {"user": {...}, "records": [...]}
 ```
+
+
+A token may be sent as anonymize returned it (`TOK:...`) or without the prefix.
 
 ### Vault-OUT — Verify Access
 

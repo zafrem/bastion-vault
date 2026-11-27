@@ -2,15 +2,31 @@ package strategies
 
 import (
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
-	"io"
+	"strings"
 )
 
-// EncryptionStrategy applies AES-256-GCM authenticated encryption to a field value.
+const (
+	encryptedPrefix = "ENC:"
+	// encryptedV1 marks values that carry their wrapped data key. Base64url has no ':', so it cannot be
+	// confused with the unversioned values of earlier releases.
+	encryptedV1 = encryptedPrefix + "v1:"
+)
+
+// ErrKeyNotKept reports a value written by a release that encrypted with a data key it never saved.
+var ErrKeyNotKept = errors.New("encryption: this value was written by an earlier version, which did not keep its " +
+	"data key; it cannot be decrypted and has to be anonymized again from the source")
+
+// ValueCipher encrypts the values of one tenant and category. What Encrypt returns must be enough, together
+// with the KMS, to decrypt later.
+type ValueCipher interface {
+	Encrypt(ctx context.Context, plain []byte) ([]byte, error)
+	Decrypt(ctx context.Context, sealed []byte) ([]byte, error)
+}
+
+// EncryptionStrategy applies authenticated encryption to a field value.
 // Used for salary data per SRS §3.3 where the value must remain recoverable by
 // authorised roles (HR Manager) but opaque to all others.
 type EncryptionStrategy struct{}
@@ -20,64 +36,35 @@ func NewEncryption() *EncryptionStrategy { return &EncryptionStrategy{} }
 func (s *EncryptionStrategy) Name() string     { return "encryption" }
 func (s *EncryptionStrategy) Reversible() bool { return true }
 
-func (s *EncryptionStrategy) Apply(_ context.Context, value string, p Params) (string, error) {
-	if len(p.EncryptionKey) == 0 {
-		return "", fmt.Errorf("encryption: key required")
+func (s *EncryptionStrategy) Apply(ctx context.Context, value string, p Params) (string, error) {
+	if p.Cipher == nil {
+		return "", fmt.Errorf("encryption: cipher required")
 	}
-	ct, err := gcmEncrypt(p.EncryptionKey, []byte(value))
+	sealed, err := p.Cipher.Encrypt(ctx, []byte(value))
 	if err != nil {
 		return "", fmt.Errorf("encryption: %w", err)
 	}
-	return "ENC:" + base64.RawURLEncoding.EncodeToString(ct), nil
+	return encryptedV1 + base64.RawURLEncoding.EncodeToString(sealed), nil
 }
 
-func (s *EncryptionStrategy) Reverse(_ context.Context, value string, p Params) (string, error) {
-	if len(p.EncryptionKey) == 0 {
-		return "", fmt.Errorf("encryption: key required for decryption")
+func (s *EncryptionStrategy) Reverse(ctx context.Context, value string, p Params) (string, error) {
+	if p.Cipher == nil {
+		return "", fmt.Errorf("encryption: cipher required for decryption")
 	}
-	const prefix = "ENC:"
-	if len(value) <= len(prefix) {
+	body, current := strings.CutPrefix(value, encryptedV1)
+	if !current {
+		if old, ok := strings.CutPrefix(value, encryptedPrefix); ok && old != "" && !strings.Contains(old, ":") {
+			return "", ErrKeyNotKept
+		}
 		return "", fmt.Errorf("encryption: not an encrypted value")
 	}
-	ct, err := base64.RawURLEncoding.DecodeString(value[len(prefix):])
+	sealed, err := base64.RawURLEncoding.DecodeString(body)
 	if err != nil {
 		return "", fmt.Errorf("encryption: base64 decode: %w", err)
 	}
-	pt, err := gcmDecrypt(p.EncryptionKey, ct)
+	plain, err := p.Cipher.Decrypt(ctx, sealed)
 	if err != nil {
 		return "", fmt.Errorf("encryption: %w", err)
 	}
-	return string(pt), nil
-}
-
-func gcmEncrypt(key, plaintext []byte) ([]byte, error) {
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return nil, err
-	}
-	return gcm.Seal(nonce, nonce, plaintext, nil), nil
-}
-
-func gcmDecrypt(key, ciphertext []byte) ([]byte, error) {
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	if len(ciphertext) < gcm.NonceSize() {
-		return nil, fmt.Errorf("ciphertext too short")
-	}
-	nonce, ct := ciphertext[:gcm.NonceSize()], ciphertext[gcm.NonceSize():]
-	return gcm.Open(nil, nonce, ct, nil)
+	return string(plain), nil
 }

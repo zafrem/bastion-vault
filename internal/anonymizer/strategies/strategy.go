@@ -24,8 +24,8 @@ type Params struct {
 	// HMACKey is the 32-byte key used for HMAC and tokenization strategies.
 	HMACKey []byte
 
-	// EncryptionKey is the 32-byte AES-256 key used by the encryption strategy.
-	EncryptionKey []byte
+	// Cipher encrypts and decrypts values for the encryption strategy.
+	Cipher ValueCipher
 
 	// MaskPattern describes how partial masking should be applied (e.g. "010-****-{last4}").
 	MaskPattern string

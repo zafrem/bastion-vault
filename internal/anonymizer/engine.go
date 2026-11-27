@@ -9,6 +9,7 @@ import (
 	"github.com/zafrem/bastion-vault/internal/anonymizer/strategies"
 	"github.com/zafrem/bastion-vault/internal/audit"
 	"github.com/zafrem/bastion-vault/internal/classification"
+	"github.com/zafrem/bastion-vault/internal/envelope"
 	"github.com/zafrem/bastion-vault/internal/exceptions"
 	"github.com/zafrem/bastion-vault/internal/kms"
 	"github.com/zafrem/bastion-vault/internal/model"
@@ -53,6 +54,7 @@ var categoryPolicies = map[model.DataCategory][]fieldPolicy{
 // Engine applies Phase-1 (strategy selection) and Phase-2 (transformation) anonymization.
 type Engine struct {
 	kmsManager   *kms.Manager
+	sealer       *envelope.Sealer
 	classifier   *classification.Classifier
 	auditor      *audit.Logger
 	strategyMap  map[model.AnonymizationStrategy]strategies.Strategy
@@ -76,6 +78,7 @@ func NewEngine(mgr *kms.Manager, cls *classification.Classifier, aud *audit.Logg
 	}
 	return &Engine{
 		kmsManager: mgr,
+		sealer:     envelope.New(mgr, mgr.CacheTTL()),
 		classifier: cls,
 		auditor:    aud,
 		strategyMap: map[model.AnonymizationStrategy]strategies.Strategy{
@@ -111,10 +114,11 @@ func (e *Engine) Anonymize(ctx context.Context, req *model.AnonymizeRequest) (*m
 		}
 	}
 
-	hmacKey, encKey, err := e.resolveKeyMaterial(ctx, req.TenantID, req.Category)
+	hmacKey, err := e.kmsManager.GetHMACKey(ctx, masterKeyID(req.TenantID, req.Category))
 	if err != nil {
-		return nil, fmt.Errorf("anonymize: key material: %w", err)
+		return nil, fmt.Errorf("anonymize: resolving HMAC key: %w", err)
 	}
+	fieldKeys := e.cipherFor(req.TenantID, req.Category)
 
 	output := make([]map[string]any, 0, len(req.Records))
 	meta := model.AnonymizeMetadata{
@@ -123,7 +127,7 @@ func (e *Engine) Anonymize(ctx context.Context, req *model.AnonymizeRequest) (*m
 	}
 
 	for _, record := range req.Records {
-		out, fieldsProcessed, stratUsed, err := e.transformRecord(ctx, record, detections, hmacKey, encKey, req.AccessLevel, req.TenantID)
+		out, fieldsProcessed, stratUsed, err := e.transformRecord(ctx, record, detections, hmacKey, fieldKeys, req.AccessLevel, req.TenantID)
 		if err != nil {
 			return nil, fmt.Errorf("anonymize: transforming record: %w", err)
 		}
@@ -171,14 +175,10 @@ func appendUnique(list []string, s string) []string {
 
 // Deanonymize reverses reversible fields for authorised callers.
 func (e *Engine) Deanonymize(ctx context.Context, req *model.DeanonymizeRequest) (*model.AnonymizeResponse, error) {
-	_, encKey, err := e.resolveKeyMaterial(ctx, req.TenantID, req.Category)
-	if err != nil {
-		return nil, fmt.Errorf("deanonymize: key material: %w", err)
-	}
-
+	fieldKeys := e.cipherFor(req.TenantID, req.Category)
 	output := make([]map[string]any, 0, len(req.Records))
 	for _, record := range req.Records {
-		out, err := e.reverseRecord(ctx, record, encKey)
+		out, err := e.reverseRecord(ctx, record, fieldKeys)
 		if err != nil {
 			return nil, fmt.Errorf("deanonymize: %w", err)
 		}
@@ -228,28 +228,12 @@ func (e *Engine) buildDetectionIndex(records []map[string]any, policies []fieldP
 	return index
 }
 
-func (e *Engine) resolveKeyMaterial(ctx context.Context, tenantID string, cat model.DataCategory) (hmacKey, encKey []byte, err error) {
-	masterKeyID := fmt.Sprintf("tenant:%s:category:%s", tenantID, string(cat))
-
-	hmacKey, err = e.kmsManager.GetHMACKey(ctx, masterKeyID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("resolving HMAC key: %w", err)
-	}
-
-	dk, err := e.kmsManager.GetOrGenerateDEK(ctx, masterKeyID, masterKeyID+":dek")
-	if err != nil {
-		return nil, nil, fmt.Errorf("resolving DEK: %w", err)
-	}
-	encKey = dk.Plaintext
-
-	return hmacKey, encKey, nil
-}
-
 func (e *Engine) transformRecord(
 	ctx context.Context,
 	record map[string]any,
 	detections map[string]fieldPolicy,
-	hmacKey, encKey []byte,
+	hmacKey []byte,
+	fieldKeys strategies.ValueCipher,
 	accessLevel model.AccessLevel,
 	tenantID string,
 ) (map[string]any, int, map[string]int, error) {
@@ -272,10 +256,10 @@ func (e *Engine) transformRecord(
 		}
 
 		params := strategies.Params{
-			HMACKey:       hmacKey,
-			EncryptionKey: encKey,
-			FieldHint:     k,
-			TenantID:      tenantID,
+			HMACKey:   hmacKey,
+			Cipher:    fieldKeys,
+			FieldHint: k,
+			TenantID:  tenantID,
 		}
 
 		transformed, err := strategy.Apply(ctx, strVal, params)
@@ -300,13 +284,13 @@ func (e *Engine) transformRecord(
 	return out, fieldsProcessed, stratUsed, nil
 }
 
-func (e *Engine) reverseRecord(ctx context.Context, record map[string]any, encKey []byte) (map[string]any, error) {
+func (e *Engine) reverseRecord(ctx context.Context, record map[string]any, fieldKeys strategies.ValueCipher) (map[string]any, error) {
 	enc := e.strategyMap[model.StrategyEncryption]
 	out := make(map[string]any, len(record))
 	for k, v := range record {
 		strVal := fmt.Sprintf("%v", v)
 		if strings.HasPrefix(strVal, "ENC:") {
-			params := strategies.Params{EncryptionKey: encKey}
+			params := strategies.Params{Cipher: fieldKeys}
 			pt, err := enc.Reverse(ctx, strVal, params)
 			if err != nil {
 				return nil, fmt.Errorf("reversing field %q: %w", k, err)

@@ -57,7 +57,7 @@ Every `Apply` and `Reverse` call receives a `Params` struct that bundles all key
 
 type Params struct {
     HMACKey             []byte // 32-byte key for HMAC and tokenization strategies
-    EncryptionKey       []byte // 32-byte AES-256 key for the encryption strategy
+    Cipher              ValueCipher // encrypts/decrypts for one tenant and category
     MaskPattern         string // override for partial masking (e.g. "010-****-{last4}")
     GeneralizationLevel int    // 0=finest, higher=coarser
     Domain              string // extra context (e.g. email domain to preserve)
@@ -247,60 +247,21 @@ func maskGeneric(v, pattern string) string {
 
 ### 4. `encryption` (AES-256-GCM)
 
-**Reversible:** yes (with DEK)
+**Reversible:** yes (with the KMS master key)
 **Used for:** salary data (HR-Finance category)
 
-AES-256-GCM with a random 12-byte nonce prepended to the ciphertext. The nonce is part of the stored value, so `Reverse` can extract it without a separate column. The `ENC:` prefix allows `Deanonymize` to distinguish encrypted fields from already-plain fields during reversal.
+Envelope encryption with AES-256-GCM. A data key from the KMS encrypts the value, and the data key, wrapped by the master key, is stored inside the value itself. Decrypting needs only the value and the KMS, so it works after a restart and on any replica.
 
-```go
-// internal/anonymizer/strategies/encryption.go
-
-func (s *EncryptionStrategy) Apply(_ context.Context, value string, p Params) (string, error) {
-    if len(p.EncryptionKey) == 0 {
-        return "", fmt.Errorf("encryption: key required")
-    }
-    ct, err := gcmEncrypt(p.EncryptionKey, []byte(value))
-    if err != nil {
-        return "", fmt.Errorf("encryption: %w", err)
-    }
-    return "ENC:" + base64.RawURLEncoding.EncodeToString(ct), nil
-}
-
-// gcmEncrypt: nonce is prepended to ciphertext in the returned slice.
-// Layout of returned bytes: [nonce (12 bytes)] [ciphertext + 16-byte GCM tag]
-func gcmEncrypt(key, plaintext []byte) ([]byte, error) {
-    block, _ := aes.NewCipher(key)
-    gcm, _   := cipher.NewGCM(block)
-
-    nonce := make([]byte, gcm.NonceSize()) // 12 bytes
-    if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-        return nil, err
-    }
-    // gcm.Seal(dst, nonce, plaintext, additionalData)
-    // Prepends nonce to the output slice — nonce is recoverable at decrypt time.
-    return gcm.Seal(nonce, nonce, plaintext, nil), nil
-}
-
-func (s *EncryptionStrategy) Reverse(_ context.Context, value string, p Params) (string, error) {
-    const prefix = "ENC:"
-    ct, _ := base64.RawURLEncoding.DecodeString(value[len(prefix):])
-    pt, err := gcmDecrypt(p.EncryptionKey, ct)
-    if err != nil {
-        return "", fmt.Errorf("encryption: %w", err)
-    }
-    return string(pt), nil
-}
-
-func gcmDecrypt(key, ciphertext []byte) ([]byte, error) {
-    block, _ := aes.NewCipher(key)
-    gcm, _   := cipher.NewGCM(block)
-    // Split nonce from ciphertext using the GCM nonce size (12 bytes).
-    nonce, ct := ciphertext[:gcm.NonceSize()], ciphertext[gcm.NonceSize():]
-    return gcm.Open(nil, nonce, ct, nil) // returns error if tag verification fails
-}
+```
+ENC:v1:<base64url of: wrapped-key length (2 bytes) | wrapped data key | nonce (12 bytes) | ciphertext + GCM tag>
 ```
 
-The GCM authentication tag means any ciphertext modification (bit flip, truncation) causes `gcmDecrypt` to return an error, providing integrity protection in addition to confidentiality.
+- **Key:** the KMS key `tenant:<tenant>:category:<category>`. A data key is reused for `kms.dek_cache_ttl` to limit KMS calls (package `internal/envelope`).
+- **Binding:** the tenant and category are authenticated with the value. It does not decrypt for another tenant or under another category, which matters because permission to decrypt is granted per tenant and category.
+- **Integrity:** any change to the value makes decryption fail.
+- **Length:** the value is longer than the plaintext by roughly the wrapped key plus 40 bytes; size columns accordingly (about 140 characters for a short value with the local KMS; other providers differ).
+
+**Values written by earlier versions** look like `ENC:<base64url>` without `v1:`. Their data key was never saved, so they cannot be decrypted. `Deanonymize` says so; anonymize those records again from the source.
 
 ---
 
@@ -485,12 +446,13 @@ func (e *Engine) Anonymize(ctx context.Context, req *model.AnonymizeRequest) (*m
     detections := e.buildDetectionIndex(req.Records, policies)
 
     // ── Resolve key material ─────────────────────────────────────────────────
-    // Both HMAC key and DEK are tenant×category scoped.
-    // This is the only KMS round-trip per batch; results are cached in Manager.
-    hmacKey, encKey, err := e.resolveKeyMaterial(ctx, req.TenantID, req.Category)
+    // Both the HMAC key and the field cipher are tenant×category scoped. The
+    // cipher asks the KMS for a data key only when a field is actually encrypted.
+    hmacKey, err := e.kmsManager.GetHMACKey(ctx, masterKeyID(req.TenantID, req.Category))
     if err != nil {
-        return nil, fmt.Errorf("anonymize: key material: %w", err)
+        return nil, fmt.Errorf("anonymize: resolving HMAC key: %w", err)
     }
+    fieldKeys := e.cipherFor(req.TenantID, req.Category)
 
     // ── Phase 2: Transform ───────────────────────────────────────────────────
     output := make([]map[string]any, 0, len(req.Records))
@@ -498,7 +460,7 @@ func (e *Engine) Anonymize(ctx context.Context, req *model.AnonymizeRequest) (*m
 
     for _, record := range req.Records {
         out, fieldsProcessed, stratUsed, err := e.transformRecord(
-            ctx, record, detections, hmacKey, encKey, req.AccessLevel, req.TenantID)
+            ctx, record, detections, hmacKey, fieldKeys, req.AccessLevel, req.TenantID)
         if err != nil {
             return nil, fmt.Errorf("anonymize: transforming record: %w", err)
         }
@@ -566,7 +528,8 @@ func (e *Engine) transformRecord(
     ctx context.Context,
     record map[string]any,
     detections map[string]fieldPolicy,
-    hmacKey, encKey []byte,
+    hmacKey []byte,
+    fieldKeys strategies.ValueCipher,
     accessLevel model.AccessLevel,
     tenantID string,
 ) (map[string]any, int, map[string]int, error) {
@@ -586,13 +549,13 @@ func (e *Engine) transformRecord(
         strategy := e.strategyMap[pol.strategy]
 
         // All strategies receive the same Params bundle. They take only what
-        // they need: HMAC strategies ignore EncryptionKey, encryption strategy
+        // they need: HMAC strategies ignore Cipher, encryption strategy
         // ignores HMACKey, etc.
         params := strategies.Params{
-            HMACKey:       hmacKey,
-            EncryptionKey: encKey,
-            FieldHint:     k,        // used by range_generalization switch
-            TenantID:      tenantID, // scopes tokendb registry lookup
+            HMACKey:   hmacKey,
+            Cipher:    fieldKeys,
+            FieldHint: k,        // used by range_generalization switch
+            TenantID:  tenantID, // scopes tokendb registry lookup
         }
 
         transformed, err := strategy.Apply(ctx, strVal, params)
@@ -626,16 +589,13 @@ func (e *Engine) transformRecord(
 
 ```go
 func (e *Engine) Deanonymize(ctx context.Context, req *model.DeanonymizeRequest) (*model.AnonymizeResponse, error) {
-    // Only the DEK is needed for deanonymization; HMAC keys are irrelevant
-    // because HMAC and masking strategies are not reversible.
-    _, encKey, err := e.resolveKeyMaterial(ctx, req.TenantID, req.Category)
-    if err != nil {
-        return nil, fmt.Errorf("deanonymize: key material: %w", err)
-    }
+    // The cipher is bound to the request's tenant and category; the data key to use travels inside each value.
+    // HMAC keys are irrelevant here because HMAC and masking strategies are not reversible.
+    fieldKeys := e.cipherFor(req.TenantID, req.Category)
 
     output := make([]map[string]any, 0, len(req.Records))
     for _, record := range req.Records {
-        out, err := e.reverseRecord(ctx, record, encKey)
+        out, err := e.reverseRecord(ctx, record, fieldKeys)
         if err != nil {
             return nil, fmt.Errorf("deanonymize: %w", err)
         }
@@ -646,14 +606,13 @@ func (e *Engine) Deanonymize(ctx context.Context, req *model.DeanonymizeRequest)
 
 // reverseRecord only reverses fields that carry the "ENC:" prefix.
 // All other fields (TOK:, HMAC:, ****) are returned as-is.
-func (e *Engine) reverseRecord(ctx context.Context, record map[string]any, encKey []byte) (map[string]any, error) {
+func (e *Engine) reverseRecord(ctx context.Context, record map[string]any, fieldKeys strategies.ValueCipher) (map[string]any, error) {
     enc := e.strategyMap[model.StrategyEncryption]
     out := make(map[string]any, len(record))
     for k, v := range record {
         strVal := fmt.Sprintf("%v", v)
         if strings.HasPrefix(strVal, "ENC:") {
-            params := strategies.Params{EncryptionKey: encKey}
-            pt, err := enc.Reverse(ctx, strVal, params)
+            pt, err := enc.Reverse(ctx, strVal, strategies.Params{Cipher: fieldKeys})
             if err != nil {
                 return nil, fmt.Errorf("reversing field %q: %w", k, err)
             }
@@ -684,11 +643,11 @@ func (e *Engine) reverseRecord(ctx context.Context, record map[string]any, encKe
 }
 ```
 
-**`resolveKeyMaterial("acme-corp", "DC-01")`:**
+**Key material for tenant `acme-corp`, category `DC-01`:**
 ```
 masterKeyID = "tenant:acme-corp:category:DC-01"
 hmacKey     = KMS.GenerateHMACKey("tenant:acme-corp:category:DC-01")
-encKey      = KMS.GetOrGenerateDEK("tenant:acme-corp:category:DC-01")
+fieldKeys   = cipherFor("acme-corp", "DC-01")   // data key requested when first needed
 ```
 
 **`buildDetectionIndex` (first record):**
